@@ -175,6 +175,18 @@ BRPORT_ATTR_FLAG(proxyarp_wifi, BR_PROXYARP_WIFI);
 BRPORT_ATTR_FLAG(multicast_flood, BR_MCAST_FLOOD);
 BRPORT_ATTR_FLAG(broadcast_flood, BR_BCAST_FLOOD);
 
+static ssize_t show_superport(struct net_bridge_port *p, char *buf)
+{
+	return sprintf(buf, "%u\n", p->superport);
+}
+static int br_set_superport(struct net_bridge_port *p, unsigned long val)
+{
+	p->superport = val;
+	return 0;
+}
+static BRPORT_ATTR(superport, S_IRUGO | S_IWUSR,
+		   show_superport, br_set_superport);
+
 #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
 static ssize_t show_multicast_router(struct net_bridge_port *p, char *buf)
 {
@@ -214,6 +226,7 @@ static const struct brport_attribute *brport_attrs[] = {
 	&brport_attr_root_block,
 	&brport_attr_learning,
 	&brport_attr_unicast_flood,
+	&brport_attr_superport,
 #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
 	&brport_attr_multicast_router,
 	&brport_attr_multicast_fast_leave,

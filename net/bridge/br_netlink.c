@@ -152,6 +152,7 @@ static inline size_t br_port_info_size(void)
 #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
 		+ nla_total_size(sizeof(u8))	/* IFLA_BRPORT_MULTICAST_ROUTER */
 #endif
+		+ nla_total_size(4)	/* IFLA_BRPORT_SUPERPORT */
 		+ 0;
 }
 
@@ -208,7 +209,8 @@ static int br_port_fill_attrs(struct sk_buff *skb,
 		       p->topology_change_ack) ||
 	    nla_put_u8(skb, IFLA_BRPORT_CONFIG_PENDING, p->config_pending) ||
 	    nla_put_u8(skb, IFLA_BRPORT_VLAN_TUNNEL, !!(p->flags &
-							BR_VLAN_TUNNEL)))
+							BR_VLAN_TUNNEL)) ||
+	    nla_put_u32(skb, IFLA_BRPORT_SUPERPORT, p->superport))
 		return -EMSGSIZE;
 
 	timerval = br_timer_value(&p->message_age_timer);
@@ -637,6 +639,7 @@ static const struct nla_policy br_port_policy[IFLA_BRPORT_MAX + 1] = {
 	[IFLA_BRPORT_MCAST_TO_UCAST] = { .type = NLA_U8 },
 	[IFLA_BRPORT_MCAST_FLOOD] = { .type = NLA_U8 },
 	[IFLA_BRPORT_BCAST_FLOOD] = { .type = NLA_U8 },
+	[IFLA_BRPORT_SUPERPORT]	= { .type = NLA_U32 },
 };
 
 /* Change the state of the port and notify spanning tree */
@@ -728,6 +731,10 @@ static int br_setport(struct net_bridge_port *p, struct nlattr *tb[])
 			return err;
 	}
 #endif
+
+	if (tb[IFLA_BRPORT_SUPERPORT])
+		p->superport = nla_get_u32(tb[IFLA_BRPORT_SUPERPORT]);
+
 	br_port_flags_change(p, old_flags ^ p->flags);
 	return 0;
 }
