@@ -10,6 +10,7 @@
 #include <linux/netconf.h>
 #include <linux/vmalloc.h>
 #include <linux/percpu.h>
+#include <net/mpls.h>
 #include <net/ip.h>
 #include <net/dst.h>
 #include <net/sock.h>
@@ -299,6 +300,7 @@ static bool mpls_egress(struct net *net, struct mpls_route *rt,
 		success = true;
 		break;
 	}
+	case MPT_HANDLER:
 	case MPT_UNSPEC:
 		/* Should have decided which protocol it is by now */
 		break;
@@ -355,6 +357,10 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 		MPLS_INC_STATS(mdev, rx_noroute);
 		goto drop;
 	}
+
+	if (rt->rt_payload_type == MPT_HANDLER)
+		return rt->rt_handler(rt->rt_harg, skb, dev, pt, hdr,
+				      orig_dev);
 
 	nh = mpls_select_multipath(rt, skb);
 	if (!nh)
@@ -947,6 +953,16 @@ static int mpls_route_add(struct mpls_route_config *cfg,
 	if (!mpls_label_ok(net, index, extack))
 		goto errout;
 
+	switch (cfg->rc_payload_type) {
+	case MPT_UNSPEC:
+	case MPT_IPV4:
+	case MPT_IPV6:
+		break;
+	default:
+		err = -EINVAL;
+		goto errout;
+	}
+
 	/* Append makes no sense with mpls */
 	err = -EOPNOTSUPP;
 	if (cfg->rc_nlflags & NLM_F_APPEND) {
@@ -1270,6 +1286,74 @@ done:
 
 	return skb->len;
 }
+
+int mpls_handler_add(struct net *net, unsigned index, mpls_handler handler,
+		     void *handler_arg)
+{
+	struct mpls_route __rcu **platform_label;
+	struct mpls_route *rt, *old;
+	int err = -EINVAL;
+
+	/* Reserved labels may not be set */
+	if (index < MPLS_LABEL_FIRST_UNRESERVED)
+		goto errout;
+
+	/* The full 20 bit range may not be supported. */
+	if (index >= net->mpls.platform_labels)
+		goto errout;
+
+	err = -EEXIST;
+	platform_label = rtnl_dereference(net->mpls.platform_label);
+	old = rtnl_dereference(platform_label[index]);
+	if (old)
+		goto errout;
+
+	err = -ENOMEM;
+	rt = mpls_rt_alloc(0, 0, 0);
+	if (!rt)
+		goto errout;
+
+	rt->rt_protocol = RTPROT_KERNEL;
+	rt->rt_payload_type = MPT_HANDLER;
+	rt->rt_handler = handler;
+	rt->rt_harg = handler_arg;
+
+	mpls_route_update(net, index, rt, NULL);
+	return 0;
+
+errout:
+	return err;
+}
+EXPORT_SYMBOL(mpls_handler_add);
+
+int mpls_handler_del(struct net *net, unsigned index)
+{
+	struct mpls_route __rcu **platform_label;
+	struct mpls_route *old;
+	int err = -EINVAL;
+
+	/* Reserved labels may not be removed */
+	if (index < MPLS_LABEL_FIRST_UNRESERVED)
+		goto errout;
+
+	/* The full 20 bit range may not be supported */
+	if (index >= net->mpls.platform_labels)
+		goto errout;
+
+	platform_label = rtnl_dereference(net->mpls.platform_label);
+	old = rtnl_dereference(platform_label[index]);
+	if (!old)
+		goto errout;
+	if (old->rt_payload_type != MPT_HANDLER)
+		goto errout;
+
+	mpls_route_update(net, index, NULL, NULL);
+
+	err = 0;
+errout:
+	return err;
+}
+EXPORT_SYMBOL(mpls_handler_del);
 
 #define MPLS_PERDEV_SYSCTL_OFFSET(field)	\
 	(&((struct mpls_dev *)0)->field)

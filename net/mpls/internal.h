@@ -78,6 +78,7 @@ enum mpls_payload_type {
 	MPT_UNSPEC, /* IPv4 or IPv6 */
 	MPT_IPV4 = 4,
 	MPT_IPV6 = 6,
+	MPT_HANDLER = 255,
 
 	/* Other types not implemented:
 	 *  - Pseudo-wire with or without control word (RFC4385)
@@ -141,6 +142,8 @@ enum mpls_ttl_propagation {
  */
 struct mpls_route { /* next hop label forwarding entry */
 	struct rcu_head		rt_rcu;
+	mpls_handler		rt_handler;
+	void			*rt_harg;
 	u8			rt_protocol;
 	u8			rt_payload_type;
 	u8			rt_max_alen;
