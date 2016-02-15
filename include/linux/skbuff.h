@@ -732,6 +732,12 @@ struct sk_buff {
 	__u32		secmark;
 #endif
 
+	unsigned		subport_cnt;
+	union {
+		__u32		subport;
+		__u32		*subport_lst;
+	};
+
 	union {
 		__u32		mark;
 		__u32		reserved_tailroom;

@@ -127,6 +127,11 @@ static void br_do_proxy_arp(struct sk_buff *skb, struct net_bridge *br,
 	}
 }
 
+static __u32 skb_subport(struct sk_buff *skb)
+{
+	return skb->subport_cnt == 1 ? skb->subport : 0;
+}
+
 /* note: already called with rcu_read_lock */
 int br_handle_frame_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
@@ -150,7 +155,8 @@ int br_handle_frame_finish(struct net *net, struct sock *sk, struct sk_buff *skb
 	/* insert into forwarding database after filtering to avoid spoofing */
 	br = p->br;
 	if (p->flags & BR_LEARNING)
-		br_fdb_update(br, p, eth_hdr(skb)->h_source, vid, false);
+		br_fdb_update(br, p, skb_subport(skb), eth_hdr(skb)->h_source,
+			      vid, false);
 
 	local_rcv = !!(br->dev->flags & IFF_PROMISC);
 	if (is_multicast_ether_addr(dest)) {
@@ -229,7 +235,8 @@ static void __br_handle_local_finish(struct sk_buff *skb)
 
 	/* check if vlan is allowed, to avoid spoofing */
 	if (p->flags & BR_LEARNING && br_should_learn(p, skb, &vid))
-		br_fdb_update(p->br, p, eth_hdr(skb)->h_source, vid, false);
+		br_fdb_update(p->br, p, skb_subport(skb),
+				eth_hdr(skb)->h_source, vid, false);
 }
 
 /* note: already called with rcu_read_lock */

@@ -29,7 +29,7 @@
 
 static struct kmem_cache *br_fdb_cache __read_mostly;
 static int fdb_insert(struct net_bridge *br, struct net_bridge_port *source,
-		      const unsigned char *addr, u16 vid);
+		      __u32 subport, const unsigned char *addr, u16 vid);
 static void fdb_notify(struct net_bridge *br,
 		       const struct net_bridge_fdb_entry *, int);
 
@@ -278,7 +278,7 @@ void br_fdb_changeaddr(struct net_bridge_port *p, const unsigned char *newaddr)
 
 insert:
 	/* insert new address,  may fail if invalid address or dup. */
-	fdb_insert(br, p, newaddr, 0);
+	fdb_insert(br, p, 0, newaddr, 0);
 
 	if (!vg || !vg->num_vlans)
 		goto done;
@@ -288,7 +288,7 @@ insert:
 	 * from under us.
 	 */
 	list_for_each_entry(v, &vg->vlan_list, vlist)
-		fdb_insert(br, p, newaddr, v->vid);
+		fdb_insert(br, p, 0, newaddr, v->vid);
 
 done:
 	spin_unlock_bh(&br->hash_lock);
@@ -307,10 +307,11 @@ void br_fdb_change_mac_address(struct net_bridge *br, const u8 *newaddr)
 	if (f && f->is_local && !f->dst && !f->added_by_user)
 		fdb_delete_local(br, NULL, f);
 
-	fdb_insert(br, NULL, newaddr, 0);
+	fdb_insert(br, NULL, 0, newaddr, 0);
 	vg = br_vlan_group(br);
 	if (!vg || !vg->num_vlans)
 		goto out;
+
 	/* Now remove and add entries for every VLAN configured on the
 	 * bridge.  This function runs under RTNL so the bitmap will not
 	 * change from under us.
@@ -321,7 +322,7 @@ void br_fdb_change_mac_address(struct net_bridge *br, const u8 *newaddr)
 		f = br_fdb_find(br, br->dev->dev_addr, v->vid);
 		if (f && f->is_local && !f->dst && !f->added_by_user)
 			fdb_delete_local(br, NULL, f);
-		fdb_insert(br, NULL, newaddr, v->vid);
+		fdb_insert(br, NULL, 0, newaddr, v->vid);
 	}
 out:
 	spin_unlock_bh(&br->hash_lock);
@@ -479,6 +480,8 @@ int br_fdb_fillbuf(struct net_bridge *br, void *buf,
 			fe->port_no = f->dst->port_no;
 			fe->port_hi = f->dst->port_no >> 8;
 
+			fe->unused = f->subport;
+
 			fe->is_local = f->is_local;
 			if (!f->is_static)
 				fe->ageing_timer_value = jiffies_delta_to_clock_t(jiffies - f->updated);
@@ -495,6 +498,7 @@ int br_fdb_fillbuf(struct net_bridge *br, void *buf,
 
 static struct net_bridge_fdb_entry *fdb_create(struct hlist_head *head,
 					       struct net_bridge_port *source,
+					       __u32 subport,
 					       const unsigned char *addr,
 					       __u16 vid,
 					       unsigned char is_local,
@@ -506,6 +510,7 @@ static struct net_bridge_fdb_entry *fdb_create(struct hlist_head *head,
 	if (fdb) {
 		memcpy(fdb->addr.addr, addr, ETH_ALEN);
 		fdb->dst = source;
+		fdb->subport = subport;
 		fdb->vlan_id = vid;
 		fdb->is_local = is_local;
 		fdb->is_static = is_static;
@@ -518,7 +523,7 @@ static struct net_bridge_fdb_entry *fdb_create(struct hlist_head *head,
 }
 
 static int fdb_insert(struct net_bridge *br, struct net_bridge_port *source,
-		  const unsigned char *addr, u16 vid)
+		      __u32 subport, const unsigned char *addr, u16 vid)
 {
 	struct hlist_head *head = &br->hash[br_mac_hash(addr, vid)];
 	struct net_bridge_fdb_entry *fdb;
@@ -538,7 +543,7 @@ static int fdb_insert(struct net_bridge *br, struct net_bridge_port *source,
 		fdb_delete(br, fdb);
 	}
 
-	fdb = fdb_create(head, source, addr, vid, 1, 1);
+	fdb = fdb_create(head, source, subport, addr, vid, 1, 1);
 	if (!fdb)
 		return -ENOMEM;
 
@@ -554,13 +559,14 @@ int br_fdb_insert(struct net_bridge *br, struct net_bridge_port *source,
 	int ret;
 
 	spin_lock_bh(&br->hash_lock);
-	ret = fdb_insert(br, source, addr, vid);
+	ret = fdb_insert(br, source, 0, addr, vid);
 	spin_unlock_bh(&br->hash_lock);
 	return ret;
 }
 
 void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
-		   const unsigned char *addr, u16 vid, bool added_by_user)
+		   __u32 subport, const unsigned char *addr, u16 vid,
+		   bool added_by_user)
 {
 	struct hlist_head *head = &br->hash[br_mac_hash(addr, vid)];
 	struct net_bridge_fdb_entry *fdb;
@@ -586,8 +592,10 @@ void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
 			unsigned long now = jiffies;
 
 			/* fastpath: update of existing entry */
-			if (unlikely(source != fdb->dst)) {
+			if (unlikely(source != fdb->dst ||
+			    subport != fdb->subport)) {
 				fdb->dst = source;
+				fdb->subport = subport;
 				fdb_modified = true;
 				/* Take over HW learned entry */
 				if (unlikely(fdb->added_by_external_learn))
@@ -603,7 +611,7 @@ void br_fdb_update(struct net_bridge *br, struct net_bridge_port *source,
 	} else {
 		spin_lock(&br->hash_lock);
 		if (likely(!fdb_find_rcu(head, addr, vid))) {
-			fdb = fdb_create(head, source, addr, vid, 0, 0);
+			fdb = fdb_create(head, source, subport, addr, vid, 0, 0);
 			if (fdb) {
 				if (unlikely(added_by_user))
 					fdb->added_by_user = 1;
@@ -664,6 +672,8 @@ static int fdb_fill_info(struct sk_buff *skb, const struct net_bridge *br,
 		goto nla_put_failure;
 
 	if (fdb->vlan_id && nla_put(skb, NDA_VLAN, sizeof(u16), &fdb->vlan_id))
+		goto nla_put_failure;
+	if (fdb->subport && nla_put(skb, NDA_SUBPORT, sizeof(u32), &fdb->subport))
 		goto nla_put_failure;
 
 	nlmsg_end(skb, nlh);
@@ -791,7 +801,7 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
 		if (!(flags & NLM_F_CREATE))
 			return -ENOENT;
 
-		fdb = fdb_create(head, source, addr, vid, 0, 0);
+		fdb = fdb_create(head, source, 0, addr, vid, 0, 0);
 		if (!fdb)
 			return -ENOMEM;
 
@@ -854,7 +864,7 @@ static int __br_fdb_add(struct ndmsg *ndm, struct net_bridge *br,
 		}
 		local_bh_disable();
 		rcu_read_lock();
-		br_fdb_update(br, p, addr, vid, true);
+		br_fdb_update(br, p, 0, addr, vid, true);
 		rcu_read_unlock();
 		local_bh_enable();
 	} else if (ndm->ndm_flags & NTF_EXT_LEARNED) {
@@ -1081,7 +1091,7 @@ int br_fdb_external_learn_add(struct net_bridge *br, struct net_bridge_port *p,
 	head = &br->hash[br_mac_hash(addr, vid)];
 	fdb = br_fdb_find(br, addr, vid);
 	if (!fdb) {
-		fdb = fdb_create(head, p, addr, vid, 0, 0);
+		fdb = fdb_create(head, p, 0, addr, vid, 0, 0);
 		if (!fdb) {
 			err = -ENOMEM;
 			goto err_unlock;
