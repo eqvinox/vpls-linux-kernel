@@ -33,4 +33,9 @@ config MPLS_IPTUNNEL
 	---help---
 	 mpls ip tunnel support.
 
+config MPLS_VPLS
+	tristate "VPLS support"
+	---help---
+	 Add support for de-&encapsulating VPLS.
+
 endif # MPLS
