@@ -100,3 +100,55 @@ controls replication of multicast packets.  This is impossible to do with
 superports, since that implies multiple distinct netdevices and the bridge
 layer replicating packets.  It's too late then, when 10 netdevices get 10
 packets to transmit.
+
+
+BRANCH IMPLEMENTATION STATUS (TO BE REMOVED BEFORE PUSHING OUT)
+---------------------------------------------------------------
+(including VPLS bits)
+
+
+So, I wrote this over christmas on a hacker event where I had some time to
+play with a VPLS network ;).  Here's the status on things.
+
+General:
+
+- I've just rebased these commits;  there were a few small changes to the
+  network code in the meantime (I don't think anything broke)
+
+  I DID NOT TEST THE REBASED VERSION.  IT COMPILES BUT MAY SET YOUR COMPUTER
+  ON FIRE.
+
+MPLS layer:
+
+- the "MPT_HANDLER" thing is probably overkill, it likely makes more sense to
+  tie in the VPLS code more directly.
+
+VPLS:
+
+- I haven't implemented the control word.
+
+- I made a design mistake with the wire ID.  It's simply not needed.  A
+  pseudowire can be identified by its incoming label.  There is also some
+  really ugly code keeping an array of wires...
+
+- The genetlink interface is not needed either.  Really, the MPLS routing
+  table can carry all of the information.  You can create a "vpls0" device
+  without any pseudowires, and then add routes with the neccessary info:
+
+  "ip -f mpls route add 100 vpls vpls0 as 200 via inet 1.2.3.4 dev eth0"
+
+  This would need the addition of a new "vpls-device" netlink attribute, and
+  would "split" the information in the route between RX and TX - the RX path
+  uses the incoming label (100) and vpls-device (vpls0) information, giving
+  the packet to the proper vpls device.  The TX path can then reuse all the
+  destination information on the route -- which would make things quite a bit
+  simpler because we can use existing handling.
+
+- I only hacked in IPv4 dst info, this would be fixed by the above.
+
+bridge:
+
+- the subport code is not finished, it doesn't actually do the multicast
+  pieces.  It should hold an array of subport indexes + an array of lifetimes
+  (subport IDs need to age out like ports), and the array can be passed down
+  on TX with RCU semantics.
