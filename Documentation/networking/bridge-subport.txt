@@ -1,0 +1,102 @@
+Bridge subport & superport support
+==================================
+
+
+Subports and superports are 2 related but distinct port functionalities of the
+Linux bridge code.  They both affect how packets are replicated on a bridge,
+implementing split-horizon functionality.
+
+
+Superports
+----------
+
+A superport is a number of bridge ports that share the same integer
+"superport" value different from zero.  The value is freely configurable by
+the user, and 0 disables the function (by comparing unequal to itself, thus
+meaning "no superport").
+
+When 2 or more bridge ports are configured with the same value, this prevents
+forwarding of packets that arrive on any of these ports out onto any other of
+these ports.  This essentially groups them into a common broadcast domain.  It
+has no effect on MAC learning, STP, or anything else.
+
+This functionality is mostly useful to build a mesh on top of tunnels, e.g.
+a triangle like this:
+
+   bridge0  tunl01 ----- tunl10 bridge1
+      tunl02                   tunl12
+           \\\               ///
+             tunl20     tunl21
+                  bridge2
+
+
+While this can be made to work with STP by blocking one of the tunnels, this
+is not desirable because that would make traffic take an extra hop.  By
+putting the ports in a superport group on each of the bridges, traffic always
+flows directly to the learned destination, without creating loops by being
+forwarded back onto the mesh.
+
+The superport code does this on top of distinct devices, which could even be
+of distinct types (physical ports, tap devices, GRETAP, VXLAN, etc.)
+
+
+Subports
+--------
+
+Subports provide very similar functionality, but are built into a particular
+network device driver (or tunnel implementation).  They are intever values
+again, but this time they provide more specific data for the driver when
+sending packets.
+
+The bridge layer makes no assumptions about the meaning of the values (other
+than removing duplicates).  They cannot be configured by the user, instead
+they are provided to the bridge layer on each received packet as appropriate.
+The bridge keeps this information along its MAC learning data and provides it
+back to the driver when sending/flooding packets.
+
+This is considerably more complicated than superports, but provides a crucial
+functionality that superports cannot:  the ability to control multicast
+transmission.
+
+The idea here is that the bridge's TX path for multicast packets can pass a
+list of subport identifiers down to the device, representing which ethernet
+stations are intended to receive the particular packet.  This is particularly
+useful in two scenarios:
+
+1.) 802.11 multicast optimization
+
+   When the 802.11 TX layer knows which stations a multicast packet is
+   actually intended for, it can do the following things:
+
+   - unicast it unconditionally if there is only a single receiver
+   - clone and unicast it, with enough information supplied to an algorithm
+     that can calculate whether it is advantageous to do so
+   - multicast and pick a higher TX rate depending on the information it has
+     on the intended receivers
+
+   All of these are available in "enterprise" 802.11 solutions, yet have
+   eluded Linux wifi APs for a while;  only recently has unicast-conversion
+   made it in (though in a much less sophisticated way).
+
+
+2.) Ethernet over Multicast-capable media tunneling
+
+   Any encapsulation of Ethernet with more than 2 endpoints that is running on
+   top of a underlay network that supports multicast may be able to benefit
+   from having the extra information.
+
+   Most prominently, the under-development IETF BIER approach (it's a shim
+   header with bits controlling replication;  packets are duplicated en route
+   so that each outgoing duplicate carries a non-overlapping subset of the
+   bits) is a direct fit for this -- the subport information can directly map
+   to bits in the BIER shim.
+
+   Other options include user-configured IP multicast group mappings and MPLS
+   multicast (which is not widely used, but well).
+
+
+The common factor between these scenarios is that it is the driver that
+controls replication of multicast packets.  This is impossible to do with
+superports, since that implies multiple distinct netdevices and the bridge
+layer replicating packets.  It's too late then, when 10 netdevices get 10
+packets to transmit.
