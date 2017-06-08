@@ -1,6 +1,9 @@
 #ifndef _VPLS_H
 #define _VPLS_H
 
+#define	VPLS_F_INET	0x01
+#define	VPLS_F_INET6	0x02
+
 enum {
 	VPLS_ATTR_UNSPEC = 0,
 	VPLS_ATTR_IFINDEX,
@@ -9,6 +12,7 @@ enum {
 	VPLS_ATTR_LABEL_OUT,
 	VPLS_ATTR_NH_DEV,
 	VPLS_ATTR_NH_IP,
+	VPLS_ATTR_NH_IPV6,
 	VPLS_ATTR_TTL,
 	__VPLS_ATTR_MAX,
 };
