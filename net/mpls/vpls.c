@@ -39,6 +39,7 @@ struct vpls_dst {
 	struct net_device *dev;
 	unsigned label_in, label_out;
 	union vpls_nh	addr;
+	u16 vlan_id;
 	u8 via_table;
 	u8 flags;
 	u8 ttl;
@@ -83,6 +84,9 @@ static int vpls_xmit_dst(struct sk_buff *skb, struct vpls_priv *vpls,
 
 	hdr = mpls_hdr(skb);
 	hdr[0] = mpls_entry_encode(dst->label_out, dst->ttl, 0, true);
+
+	if (dst->flags & VPLS_F_VLAN)
+		skb_vlan_push(skb, htons(ETH_P_8021Q), dst->vlan_id);
 
 	err = neigh_xmit(dst->via_table, out_dev, &dst->addr, skb);
 	if (err)
@@ -386,6 +390,7 @@ static struct nla_policy vpls_genl_policy[VPLS_ATTR_MAX + 1] = {
 	[VPLS_ATTR_NH_IP]	= { .type = NLA_U32 },
 	[VPLS_ATTR_NH_IPV6]	= { .len = sizeof(struct in6_addr) },
 	[VPLS_ATTR_TTL]		= { .type = NLA_U8  },
+	[VPLS_ATTR_VLANID]	= { .type = NLA_U16 },
 };
 
 static int vpls_genl_newwire(struct sk_buff *skb, struct genl_info *info);
@@ -514,6 +519,10 @@ static int vpls_genl_newwire(struct sk_buff *skb, struct genl_info *info)
 		newdsts->items[wireid].flags |= VPLS_F_INET6;
 		newdsts->items[wireid].via_table = NEIGH_ND_TABLE;
 	}
+	if (data[VPLS_ATTR_VLANID]) {
+		newdsts->items[wireid].vlan_id = nla_get_u16(data[VPLS_ATTR_VLANID]);
+		newdsts->items[wireid].flags |= VPLS_F_VLAN;
+	}
 
 	if (remove_lbl && remove_lbl != newdsts->items[wireid].label_in)
 		mpls_handler_del(priv->encap_net, remove_lbl);
@@ -630,6 +639,9 @@ static int vpls_nl_wire_msg(struct sk_buff *msg, struct net_device *dev,
 		goto nla_put_failure;
 	if (nla_put_u8(msg, VPLS_ATTR_TTL, dst->ttl))
 		goto nla_put_failure;
+	if (dst->flags & VPLS_F_VLAN)
+		if (nla_put_u16(msg, VPLS_ATTR_VLANID, dst->vlan_id))
+			goto nla_put_failure;
 	genlmsg_end(msg, hdr);
 	return 0;
 

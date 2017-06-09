@@ -3,6 +3,7 @@
 
 #define	VPLS_F_INET	0x01
 #define	VPLS_F_INET6	0x02
+#define	VPLS_F_VLAN	0x04
 
 enum {
 	VPLS_ATTR_UNSPEC = 0,
@@ -14,6 +15,7 @@ enum {
 	VPLS_ATTR_NH_IP,
 	VPLS_ATTR_NH_IPV6,
 	VPLS_ATTR_TTL,
+	VPLS_ATTR_VLANID,
 	__VPLS_ATTR_MAX,
 };
 #define VPLS_ATTR_MAX (__VPLS_ATTR_MAX - 1)
