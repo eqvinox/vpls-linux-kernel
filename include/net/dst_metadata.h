@@ -8,11 +8,16 @@
 enum metadata_type {
 	METADATA_IP_TUNNEL,
 	METADATA_HW_PORT_MUX,
+	METADATA_VPLS,
 };
 
 struct hw_port_info {
 	struct net_device *lower_dev;
 	u32 port_id;
+};
+
+struct vpls_info {
+	u32 pw_label;
 };
 
 struct metadata_dst {
@@ -21,6 +26,7 @@ struct metadata_dst {
 	union {
 		struct ip_tunnel_info	tun_info;
 		struct hw_port_info	port_info;
+		struct vpls_info	vpls_info;
 	} u;
 };
 
@@ -54,6 +60,15 @@ static inline struct ip_tunnel_info *skb_tunnel_info(struct sk_buff *skb)
 	return NULL;
 }
 
+static inline struct vpls_info *skb_vpls_info(struct sk_buff *skb)
+{
+	struct metadata_dst *md_dst = skb_metadata_dst(skb);
+	if (md_dst && md_dst->type == METADATA_VPLS)
+		return &md_dst->u.vpls_info;
+	return NULL;
+}
+
+
 static inline bool skb_valid_dst(const struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
@@ -74,6 +89,9 @@ static inline int metadata_dst_cmp(const struct metadata_dst *a,
 	case METADATA_HW_PORT_MUX:
 		return memcmp(&a->u.port_info, &b->u.port_info,
 			      sizeof(a->u.port_info));
+	case METADATA_VPLS:
+		return memcmp(&a->u.vpls_info, &b->u.vpls_info,
+			      sizeof(a->u.vpls_info));
 	case METADATA_IP_TUNNEL:
 		return memcmp(&a->u.tun_info, &b->u.tun_info,
 			      sizeof(a->u.tun_info) +
@@ -220,4 +238,10 @@ static inline struct metadata_dst *ipv6_tun_rx_dst(struct sk_buff *skb,
 				  0, ip6_flowlabel(ip6h), flags, tunnel_id,
 				  md_size);
 }
+
+static inline struct metadata_dst *vpls_rx_dst(void)
+{
+	return metadata_dst_alloc(0, METADATA_VPLS, GFP_ATOMIC);
+}
+
 #endif /* __NET_DST_METADATA_H */
