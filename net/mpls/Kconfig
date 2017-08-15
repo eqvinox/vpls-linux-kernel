@@ -27,6 +27,17 @@ config MPLS_ROUTING
 	---help---
 	 Add support for forwarding of mpls packets.
 
+config MPLS_VPLS
+	bool "VPLS support"
+	default y
+	depends on MPLS_ROUTING && BRIDGE_NETFILTER=n
+	---help---
+	 Add support for de-&encapsulating VPLS.  Not compatible with
+	 bridge netfilter due to the latter stomping over VPLS' dst metadata.
+
+comment "disable 'Bridged IP/ARP packets filtering' for VPLS support"
+	depends on BRIDGE_NETFILTER
+
 config MPLS_IPTUNNEL
 	tristate "MPLS: IP over MPLS tunnel support"
 	depends on LWTUNNEL && MPLS_ROUTING
