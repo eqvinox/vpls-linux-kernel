@@ -210,4 +210,8 @@ bool mpls_pkt_too_big(const struct sk_buff *skb, unsigned int mtu);
 void mpls_stats_inc_outucastpkts(struct net_device *dev,
 				 const struct sk_buff *skb);
 
+struct mpls_route *mpls_route_input_rcu(struct net *net, unsigned index);
+int mpls_rt_xmit(struct sk_buff *skb, struct mpls_route *rt,
+		 struct mpls_entry_decoded dec);
+
 #endif /* MPLS_INTERNAL_H */
