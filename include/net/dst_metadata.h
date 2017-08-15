@@ -24,7 +24,7 @@ struct metadata_dst {
 	} u;
 };
 
-static inline struct metadata_dst *skb_metadata_dst(struct sk_buff *skb)
+static inline struct metadata_dst *skb_metadata_dst(const struct sk_buff *skb)
 {
 	struct metadata_dst *md_dst = (struct metadata_dst *) skb_dst(skb);
 
@@ -32,6 +32,11 @@ static inline struct metadata_dst *skb_metadata_dst(struct sk_buff *skb)
 		return md_dst;
 
 	return NULL;
+}
+
+static inline struct metadata_dst *metadata_dst_clone(struct metadata_dst *md_dst)
+{
+	return (struct metadata_dst *)dst_clone(&md_dst->dst);
 }
 
 static inline struct ip_tunnel_info *skb_tunnel_info(struct sk_buff *skb)
@@ -56,16 +61,11 @@ static inline bool skb_valid_dst(const struct sk_buff *skb)
 	return dst && !(dst->flags & DST_METADATA);
 }
 
-static inline int skb_metadata_dst_cmp(const struct sk_buff *skb_a,
-				       const struct sk_buff *skb_b)
+static inline int metadata_dst_cmp(const struct metadata_dst *a,
+				   const struct metadata_dst *b)
 {
-	const struct metadata_dst *a, *b;
-
-	if (!(skb_a->_skb_refdst | skb_b->_skb_refdst))
+	if (!(a || b))
 		return 0;
-
-	a = (const struct metadata_dst *) skb_dst(skb_a);
-	b = (const struct metadata_dst *) skb_dst(skb_b);
 
 	if (!a != !b || a->type != b->type)
 		return 1;
@@ -81,6 +81,15 @@ static inline int skb_metadata_dst_cmp(const struct sk_buff *skb_a,
 	default:
 		return 1;
 	}
+}
+
+static inline int skb_metadata_dst_cmp(const struct sk_buff *skb_a,
+				       const struct sk_buff *skb_b)
+{
+	if (!(skb_a->_skb_refdst | skb_b->_skb_refdst))
+		return 0;
+	return metadata_dst_cmp(skb_metadata_dst(skb_a),
+				skb_metadata_dst(skb_b));
 }
 
 void metadata_dst_free(struct metadata_dst *);
