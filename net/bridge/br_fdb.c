@@ -671,6 +671,18 @@ static int fdb_fill_info(struct sk_buff *skb, const struct net_bridge *br,
 
 	if (fdb->vlan_id && nla_put(skb, NDA_VLAN, sizeof(u16), &fdb->vlan_id))
 		goto nla_put_failure;
+	if (fdb->md_dst) {
+		struct metadata_dst *md_dst;
+		md_dst = (struct metadata_dst *)fdb->md_dst;
+		/* ensured in br_fdb_update */
+		BUG_ON(!(md_dst->dst.flags & DST_METADATA));
+
+		if (md_dst->type == METADATA_VPLS) {
+			unsigned wire = md_dst->u.vpls_info.pw_label;
+			if (nla_put_u32(skb, NDA_VPLS_WIRE, wire))
+				goto nla_put_failure;
+		}
+	}
 
 	nlmsg_end(skb, nlh);
 	return 0;
