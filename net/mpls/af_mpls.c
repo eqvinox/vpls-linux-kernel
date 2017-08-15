@@ -43,7 +43,7 @@ static void rtmsg_lfib(int event, u32 label, struct mpls_route *rt,
 		       struct nlmsghdr *nlh, struct net *net, u32 portid,
 		       unsigned int nlm_flags);
 
-static struct mpls_route *mpls_route_input_rcu(struct net *net, unsigned index)
+struct mpls_route *mpls_route_input_rcu(struct net *net, unsigned index)
 {
 	struct mpls_route *rt = NULL;
 
@@ -313,15 +313,8 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	struct net *net = dev_net(dev);
 	struct mpls_shim_hdr *hdr;
 	struct mpls_route *rt;
-	struct mpls_nh *nh;
 	struct mpls_entry_decoded dec;
-	struct net_device *out_dev;
-	struct mpls_dev *out_mdev;
 	struct mpls_dev *mdev;
-	unsigned int hh_len;
-	unsigned int new_header_size;
-	unsigned int mtu;
-	int err;
 
 	/* Careful this entire function runs inside of an rcu critical section */
 
@@ -356,9 +349,6 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 		goto drop;
 	}
 
-	nh = mpls_select_multipath(rt, skb);
-	if (!nh)
-		goto err;
 
 	/* Pop the label */
 	skb_pull(skb, sizeof(*hdr));
@@ -375,6 +365,32 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	if (dec.ttl <= 1)
 		goto err;
 	dec.ttl -= 1;
+
+	if (mpls_rt_xmit(skb, rt, dec))
+		goto drop;
+	return 0;
+
+err:
+	MPLS_INC_STATS(mdev, rx_errors);
+drop:
+	kfree_skb(skb);
+	return NET_RX_DROP;
+}
+
+int mpls_rt_xmit(struct sk_buff *skb, struct mpls_route *rt,
+		 struct mpls_entry_decoded dec)
+{
+	struct mpls_nh *nh;
+	struct net_device *out_dev = NULL;
+	struct mpls_dev *out_mdev;
+	unsigned int hh_len;
+	unsigned int new_header_size;
+	unsigned int mtu;
+	int err;
+
+	nh = mpls_select_multipath(rt, skb);
+	if (!nh)
+		goto tx_err;
 
 	/* Find the output device */
 	out_dev = rcu_dereference(nh->nh_dev);
@@ -401,8 +417,9 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	if (unlikely(!new_header_size && dec.bos)) {
 		/* Penultimate hop popping */
 		if (!mpls_egress(dev_net(out_dev), rt, skb, dec))
-			goto err;
+			goto tx_err;
 	} else {
+		struct mpls_shim_hdr *hdr;
 		bool bos;
 		int i;
 		skb_push(skb, new_header_size);
@@ -435,12 +452,7 @@ tx_err:
 	out_mdev = out_dev ? mpls_dev_get(out_dev) : NULL;
 	if (out_mdev)
 		MPLS_INC_STATS(out_mdev, tx_errors);
-	goto drop;
-err:
-	MPLS_INC_STATS(mdev, rx_errors);
-drop:
-	kfree_skb(skb);
-	return NET_RX_DROP;
+	return -1;
 }
 
 static struct packet_type mpls_packet_type __read_mostly = {
