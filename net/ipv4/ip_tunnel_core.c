@@ -277,11 +277,9 @@ static int ip_tun_build_state(struct nlattr *attr,
 	return 0;
 }
 
-static int ip_tun_fill_encap_info(struct sk_buff *skb,
-				  struct lwtunnel_state *lwtstate)
+static int ip_tun_fill_common(struct sk_buff *skb,
+			      struct ip_tunnel_info *tun_info)
 {
-	struct ip_tunnel_info *tun_info = lwt_tun_info(lwtstate);
-
 	if (nla_put_be64(skb, LWTUNNEL_IP_ID, tun_info->key.tun_id,
 			 LWTUNNEL_IP_PAD) ||
 	    nla_put_in_addr(skb, LWTUNNEL_IP_DST, tun_info->key.u.ipv4.dst) ||
@@ -293,6 +291,25 @@ static int ip_tun_fill_encap_info(struct sk_buff *skb,
 
 	return 0;
 }
+
+static int ip_tun_fill_encap_info(struct sk_buff *skb,
+				  struct lwtunnel_state *lwtstate)
+{
+	struct ip_tunnel_info *tun_info = lwt_tun_info(lwtstate);
+	return ip_tun_fill_common(skb, tun_info);
+}
+
+int ip_tunnel_fill_metadst(struct sk_buff *skb, struct metadata_dst *md_dst)
+{
+	int err;
+	if (md_dst->type != METADATA_IP_TUNNEL)
+		return 0;
+	err = ip_tun_fill_common(skb, &md_dst->u.tun_info);
+	if (err)
+		return err;
+	return LWTUNNEL_ENCAP_IP;
+}
+EXPORT_SYMBOL_GPL(ip_tunnel_fill_metadst);
 
 static int ip_tun_encap_nlsize(struct lwtunnel_state *lwtstate)
 {

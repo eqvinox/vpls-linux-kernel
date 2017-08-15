@@ -947,6 +947,7 @@ static const struct net_device_ops gre_tap_netdev_ops = {
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
 	.ndo_get_iflink		= ip_tunnel_get_iflink,
 	.ndo_fill_metadata_dst	= gre_fill_metadata_dst,
+	.ndo_metadst_fill	= ip_tunnel_fill_metadst,
 };
 
 static void ipgre_tap_setup(struct net_device *dev)

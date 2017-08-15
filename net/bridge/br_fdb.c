@@ -671,6 +671,27 @@ static int fdb_fill_info(struct sk_buff *skb, const struct net_bridge *br,
 
 	if (fdb->vlan_id && nla_put(skb, NDA_VLAN, sizeof(u16), &fdb->vlan_id))
 		goto nla_put_failure;
+	if (fdb->md_dst && fdb->dst) {
+		struct net_device *dev = fdb->dst->dev;
+
+		if (dev->netdev_ops &&
+		    dev->netdev_ops->ndo_metadst_fill) {
+			struct nlattr *nest;
+			int ret;
+
+			nest = nla_nest_start(skb, NDA_ENCAP);
+			if (!nest)
+				goto nla_put_failure;
+			ret = dev->netdev_ops->ndo_metadst_fill(skb,
+								fdb->md_dst);
+			if (ret < 0)
+				goto nla_put_failure;
+			nla_nest_end(skb, nest);
+
+			if (ret && nla_put_u16(skb, NDA_ENCAP_TYPE, ret))
+				goto nla_put_failure;
+		}
+	}
 
 	nlmsg_end(skb, nlh);
 	return 0;
@@ -776,10 +797,12 @@ out:
 
 /* Update (create or replace) forwarding database entry */
 static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
-			 const __u8 *addr, __u16 state, __u16 flags, __u16 vid)
+			 struct metadata_dst *md_dst, const __u8 *addr,
+			 __u16 state, __u16 flags, __u16 vid)
 {
 	struct hlist_head *head = &br->hash[br_mac_hash(addr, vid)];
 	struct net_bridge_fdb_entry *fdb;
+	struct metadata_dst *old_dst;
 	bool modified = false;
 
 	/* If the port cannot learn allow only local and static entries */
@@ -799,7 +822,7 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
 		if (!(flags & NLM_F_CREATE))
 			return -ENOENT;
 
-		fdb = fdb_create(head, source, NULL, addr, vid, 0, 0);
+		fdb = fdb_create(head, source, md_dst, addr, vid, 0, 0);
 		if (!fdb)
 			return -ENOMEM;
 
@@ -810,6 +833,11 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
 
 		if (fdb->dst != source) {
 			fdb->dst = source;
+
+			old_dst = xchg(&fdb->md_dst,
+				       metadata_dst_clone(md_dst));
+			dst_release(&old_dst->dst);
+
 			modified = true;
 		}
 	}
@@ -849,8 +877,8 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
 }
 
 static int __br_fdb_add(struct ndmsg *ndm, struct net_bridge *br,
-			struct net_bridge_port *p, const unsigned char *addr,
-			u16 nlh_flags, u16 vid)
+			struct net_bridge_port *p, struct metadata_dst *md_dst,
+			const unsigned char *addr, u16 nlh_flags, u16 vid)
 {
 	int err = 0;
 
@@ -862,14 +890,14 @@ static int __br_fdb_add(struct ndmsg *ndm, struct net_bridge *br,
 		}
 		local_bh_disable();
 		rcu_read_lock();
-		br_fdb_update(br, p, NULL, addr, vid, true);
+		br_fdb_update(br, p, md_dst, addr, vid, true);
 		rcu_read_unlock();
 		local_bh_enable();
 	} else if (ndm->ndm_flags & NTF_EXT_LEARNED) {
-		err = br_fdb_external_learn_add(br, p, addr, vid);
+		err = br_fdb_external_learn_add(br, p, md_dst, addr, vid);
 	} else {
 		spin_lock_bh(&br->hash_lock);
-		err = fdb_add_entry(br, p, addr, ndm->ndm_state,
+		err = fdb_add_entry(br, p, md_dst, addr, ndm->ndm_state,
 				    nlh_flags, vid);
 		spin_unlock_bh(&br->hash_lock);
 	}
@@ -886,6 +914,7 @@ int br_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 	struct net_bridge_port *p = NULL;
 	struct net_bridge_vlan *v;
 	struct net_bridge *br = NULL;
+	struct metadata_dst *md_dst = NULL;
 	int err = 0;
 
 	if (!(ndm->ndm_state & (NUD_PERMANENT|NUD_NOARP|NUD_REACHABLE))) {
@@ -898,6 +927,22 @@ int br_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 		return -EINVAL;
 	}
 
+	if (tb[NDA_ENCAP_TYPE] && tb[NDA_ENCAP]) {
+		if (!dev->netdev_ops ||
+		    !dev->netdev_ops->ndo_metadst_build) {
+			pr_info("bridge: target device does not support ENCAP\n");
+			return -EINVAL;
+		}
+
+		err = dev->netdev_ops->ndo_metadst_build(dev, tb[NDA_ENCAP],
+							 &md_dst, NULL);
+		if (err)
+			return err;
+	} else if (tb[NDA_ENCAP_TYPE] || tb[NDA_ENCAP]) {
+		pr_info("bridge: RTM_NEWNEIGH with unpaired ENCAP_TYPE / ENCAP\n");
+		return -EINVAL;
+	}
+
 	if (dev->priv_flags & IFF_EBRIDGE) {
 		br = netdev_priv(dev);
 		vg = br_vlan_group(br);
@@ -906,7 +951,8 @@ int br_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 		if (!p) {
 			pr_info("bridge: RTM_NEWNEIGH %s not a bridge port\n",
 				dev->name);
-			return -EINVAL;
+			err = -EINVAL;
+			goto out;
 		}
 		br = p->br;
 		vg = nbp_vlan_group(p);
@@ -916,13 +962,14 @@ int br_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 		v = br_vlan_find(vg, vid);
 		if (!v || !br_vlan_should_use(v)) {
 			pr_info("bridge: RTM_NEWNEIGH with unconfigured vlan %d on %s\n", vid, dev->name);
-			return -EINVAL;
+			err = -EINVAL;
+			goto out;
 		}
 
 		/* VID was specified, so use it. */
-		err = __br_fdb_add(ndm, br, p, addr, nlh_flags, vid);
+		err = __br_fdb_add(ndm, br, p, md_dst, addr, nlh_flags, vid);
 	} else {
-		err = __br_fdb_add(ndm, br, p, addr, nlh_flags, 0);
+		err = __br_fdb_add(ndm, br, p, md_dst, addr, nlh_flags, 0);
 		if (err || !vg || !vg->num_vlans)
 			goto out;
 
@@ -933,13 +980,14 @@ int br_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 		list_for_each_entry(v, &vg->vlan_list, vlist) {
 			if (!br_vlan_should_use(v))
 				continue;
-			err = __br_fdb_add(ndm, br, p, addr, nlh_flags, v->vid);
+			err = __br_fdb_add(ndm, br, p, md_dst, addr, nlh_flags, v->vid);
 			if (err)
 				goto out;
 		}
 	}
 
 out:
+	dst_release(&md_dst->dst);
 	return err;
 }
 
@@ -1077,9 +1125,11 @@ void br_fdb_unsync_static(struct net_bridge *br, struct net_bridge_port *p)
 }
 
 int br_fdb_external_learn_add(struct net_bridge *br, struct net_bridge_port *p,
+			      struct metadata_dst *md_dst,
 			      const unsigned char *addr, u16 vid)
 {
 	struct net_bridge_fdb_entry *fdb;
+	struct metadata_dst *old_dst;
 	struct hlist_head *head;
 	bool modified = false;
 	int err = 0;
@@ -1089,7 +1139,7 @@ int br_fdb_external_learn_add(struct net_bridge *br, struct net_bridge_port *p,
 	head = &br->hash[br_mac_hash(addr, vid)];
 	fdb = br_fdb_find(br, addr, vid);
 	if (!fdb) {
-		fdb = fdb_create(head, p, NULL, addr, vid, 0, 0);
+		fdb = fdb_create(head, p, md_dst, addr, vid, 0, 0);
 		if (!fdb) {
 			err = -ENOMEM;
 			goto err_unlock;
@@ -1101,6 +1151,9 @@ int br_fdb_external_learn_add(struct net_bridge *br, struct net_bridge_port *p,
 
 		if (fdb->dst != p) {
 			fdb->dst = p;
+			old_dst = xchg(&fdb->md_dst,
+				       metadata_dst_clone(md_dst));
+			dst_release(&old_dst->dst);
 			modified = true;
 		}
 
