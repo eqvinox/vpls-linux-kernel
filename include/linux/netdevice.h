@@ -828,6 +828,8 @@ struct xfrmdev_ops {
 };
 #endif
 
+struct metadata_dst;
+
 /*
  * This structure defines the management hooks for network devices.
  * The following hooks can be defined; unless noted otherwise, they are
@@ -1128,6 +1130,15 @@ struct xfrmdev_ops {
  * void (*ndo_xdp_flush)(struct net_device *dev);
  *	This function is used to inform the driver to flush a paticular
  *	xpd tx queue. Must be called on same CPU as xdp_xmit.
+ * int (*ndo_metadst_fill)(struct sk_buff *skb, struct metadata_dst *dst);
+ *	Used to encapsulate a metadata_dst that is associated with this
+ *	netdevice into the appropriate netlink attributes on skb.
+ *	Needs to return a lwtunnel_encap_types value if valid data was filled.
+ * int (*ndo_metadst_build)(struct net_device *dev, struct nlattr *meta,
+ *			    struct metadata_dst **dst,
+ *			    struct netlink_ext_ack *extack);
+ *	Reverse of the previous function, build a metadata_dst from netlink
+ *	attributes.  Should perform appropriate validation.
  */
 struct net_device_ops {
 	int			(*ndo_init)(struct net_device *dev);
@@ -1314,6 +1325,13 @@ struct net_device_ops {
 	int			(*ndo_xdp_xmit)(struct net_device *dev,
 						struct xdp_buff *xdp);
 	void			(*ndo_xdp_flush)(struct net_device *dev);
+
+	int			(*ndo_metadst_fill)(struct sk_buff *skb,
+						    struct metadata_dst *dst);
+	int			(*ndo_metadst_build)(struct net_device *dev,
+						     struct nlattr *meta,
+						     struct metadata_dst **dst,
+						     struct netlink_ext_ack *extack);
 };
 
 /**

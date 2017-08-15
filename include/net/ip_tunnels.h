@@ -451,6 +451,11 @@ void __init ip_tunnel_core_init(void);
 void ip_tunnel_need_metadata(void);
 void ip_tunnel_unneed_metadata(void);
 
+int ip_tunnel_fill_metadst(struct sk_buff *skb, struct metadata_dst *md_dst);
+int ip_tunnel_build_metadst(struct net_device *dev, struct nlattr *meta,
+			    struct metadata_dst **dst,
+			    struct netlink_ext_ack *extack);
+
 #else /* CONFIG_INET */
 
 static inline struct ip_tunnel_info *lwt_tun_info(struct lwtunnel_state *lwtstate)
