@@ -76,6 +76,7 @@ struct sk_buff;
 
 enum mpls_payload_type {
 	MPT_UNSPEC, /* IPv4 or IPv6 */
+	MPT_VPLS = 2,	/* pseudowire */
 	MPT_IPV4 = 4,
 	MPT_IPV6 = 6,
 
@@ -153,6 +154,8 @@ struct mpls_route { /* next hop label forwarding entry */
 	u8			rt_nh_size;
 	u8			rt_via_offset;
 	u8			rt_reserved1;
+	struct net_device	*rt_vpls_dev;
+
 	struct mpls_nh		rt_nh[0];
 };
 
@@ -213,5 +216,31 @@ void mpls_stats_inc_outucastpkts(struct net_device *dev,
 struct mpls_route *mpls_route_input_rcu(struct net *net, unsigned index);
 int mpls_rt_xmit(struct sk_buff *skb, struct mpls_route *rt,
 		 struct mpls_entry_decoded dec);
+
+#ifdef CONFIG_MPLS_VPLS
+int vpls_rcv(struct sk_buff *skb, struct net_device *in_dev,
+	     struct packet_type *pt, struct mpls_route *rt,
+	     struct mpls_shim_hdr *hdr, struct net_device *orig_dev);
+void vpls_label_update(unsigned label, struct mpls_route *rt_old,
+		       struct mpls_route *rt_new);
+__init int vpls_init(void);
+__exit void vpls_exit(void);
+int is_vpls_dev(struct net_device *dev);
+
+#else /* !CONFIG_MPLS_VPLS */
+static inline int vpls_rcv(skb, in_dev, pt, rt, hdr, orig_dev)
+{
+	kfree_skb(skb);
+	return NET_RX_DROP;
+}
+static inline int is_vpls_dev(struct net_device *dev)
+{
+	return 0;
+}
+
+#define vpls_label_update(label, rt_old, rt_new) do { } while (0)
+#define vpls_init() do { } while (0)
+#define vpls_exit() do { } while (0)
+#endif
 
 #endif /* MPLS_INTERNAL_H */
