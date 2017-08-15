@@ -326,6 +326,7 @@ enum rtattr_type_t {
 	RTA_PAD,
 	RTA_UID,
 	RTA_TTL_PROPAGATE,
+	RTA_VPLS_IF,
 	__RTA_MAX
 };
 
