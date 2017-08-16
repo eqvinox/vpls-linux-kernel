@@ -156,7 +156,7 @@ EXPORT_SYMBOL_GPL(br_forward);
 
 static struct net_bridge_port *maybe_deliver(
 	struct net_bridge_port *prev, struct net_bridge_port *p,
-	struct sk_buff *skb, bool local_orig)
+	struct sk_buff *skb, struct metadata_dst *md_dst, bool local_orig)
 {
 	int err;
 
@@ -171,6 +171,10 @@ static struct net_bridge_port *maybe_deliver(
 		return ERR_PTR(err);
 
 out:
+	skb_dst_drop(skb);
+	if (md_dst)
+		skb_dst_set_noref(skb, &md_dst->dst);
+
 	return p;
 }
 
@@ -208,7 +212,7 @@ void br_flood(struct net_bridge *br, struct sk_buff *skb,
 		    BR_INPUT_SKB_CB(skb)->proxyarp_replied)
 			continue;
 
-		prev = maybe_deliver(prev, p, skb, local_orig);
+		prev = maybe_deliver(prev, p, skb, NULL, local_orig);
 		if (IS_ERR(prev))
 			goto out;
 		if (prev == p)
@@ -267,6 +271,7 @@ void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 	struct net_bridge_port *prev = NULL;
 	struct net_bridge_port_group *p;
 	struct hlist_node *rp;
+	struct metadata_dst *md_dst;
 
 	rp = rcu_dereference(hlist_first_rcu(&br->router_list));
 	p = mdst ? rcu_dereference(mdst->ports) : NULL;
@@ -279,6 +284,7 @@ void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 
 		if ((unsigned long)lport > (unsigned long)rport) {
 			port = lport;
+			md_dst = p->md_dst;
 
 			if (port->flags & BR_MULTICAST_TO_UNICAST) {
 				maybe_deliver_addr(lport, skb, p->eth_addr,
@@ -287,9 +293,10 @@ void br_multicast_flood(struct net_bridge_mdb_entry *mdst,
 			}
 		} else {
 			port = rport;
+			md_dst = NULL;
 		}
 
-		prev = maybe_deliver(prev, port, skb, local_orig);
+		prev = maybe_deliver(prev, port, skb, md_dst, local_orig);
 delivered:
 		if (IS_ERR(prev))
 			goto out;
