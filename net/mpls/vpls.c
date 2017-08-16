@@ -78,11 +78,13 @@ static netdev_tx_t vpls_xmit(struct sk_buff *skb, struct net_device *dev)
 	int err = -EINVAL, ok_count = 0;
 	struct vpls_priv *priv = netdev_priv(dev);
 	struct vpls_info *vi;
+	struct metadata_multi *multi;
 	struct pcpu_sw_netstats *stats;
 	size_t len = skb->len;
 
 	rcu_read_lock();
 	vi = skb_vpls_info(skb);
+	multi = skb_multi_info(skb);
 
 	skb_orphan(skb);
 	skb_forward_csum(skb);
@@ -91,6 +93,28 @@ static netdev_tx_t vpls_xmit(struct sk_buff *skb, struct net_device *dev)
 		err = vpls_xmit_wire(skb, dev, priv, vi->pw_label);
 		if (err)
 			goto out_err;
+	} else if (multi) {
+		struct sk_buff *cloned;
+		size_t i;
+
+		netdev_warn(dev, "multi-tx, count %u", (unsigned)multi->count);
+
+		for (i = 0; i < multi->count; i++) {
+			struct metadata_dst *md = multi->dsts[i];
+			if (md->type != METADATA_VPLS)
+				continue;
+			vi = &md->u.vpls_info;
+
+			cloned = skb_clone(skb, GFP_KERNEL);
+			if (vpls_xmit_wire(cloned, dev, priv, vi->pw_label))
+				consume_skb(cloned);
+			else
+				ok_count++;
+		}
+		if (!ok_count)
+			goto out_err;
+
+		consume_skb(skb);
 	} else {
 		struct sk_buff *cloned;
 		struct vpls_wirelist *wl;
