@@ -477,6 +477,7 @@ struct mpls_route_config {
 	u32			rc_protocol;
 	u32			rc_ifindex;
 	u32			rc_vpls_ifindex;
+	u8			rc_vpls_flags;
 	u8			rc_via_table;
 	u8			rc_via_alen;
 	u8			rc_via[MAX_VIA_ALEN];
@@ -1036,6 +1037,7 @@ static int mpls_route_add(struct mpls_route_config *cfg,
 	rt->rt_payload_type = cfg->rc_payload_type;
 	rt->rt_ttl_propagate = cfg->rc_ttl_propagate;
 	rt->rt_vpls_dev = vpls_dev;
+	rt->rt_vpls_flags = cfg->rc_vpls_flags;
 
 	if (cfg->rc_mp)
 		err = mpls_nh_build_multi(cfg, rt, max_labels, extack);
@@ -1819,6 +1821,9 @@ static int rtm_to_route_config(struct sk_buff *skb,
 			cfg->rc_vpls_ifindex = nla_get_u32(nla);
 			cfg->rc_payload_type = MPT_VPLS;
 			break;
+		case RTA_VPLS_FLAGS:
+			cfg->rc_vpls_flags = nla_get_u8(nla);
+			break;
 		case RTA_NEWDST:
 			if (nla_get_labels(nla, MAX_NEW_LABELS,
 					   &cfg->rc_output_labels,
@@ -1956,6 +1961,9 @@ static int mpls_dump_route(struct sk_buff *skb, u32 portid, u32 seq, int event,
 
 	if (rt->rt_vpls_dev)
 		if (nla_put_u32(skb, RTA_VPLS_IF, rt->rt_vpls_dev->ifindex))
+			goto nla_put_failure;
+	if (rt->rt_vpls_flags)
+		if (nla_put_u8(skb, RTA_VPLS_FLAGS, rt->rt_vpls_flags))
 			goto nla_put_failure;
 
 	if (rt->rt_nhn == 1) {
@@ -2269,6 +2277,9 @@ static int mpls_getroute(struct sk_buff *in_skb, struct nlmsghdr *in_nlh,
 
 	if (rt->rt_vpls_dev)
 		if (nla_put_u32(skb, RTA_VPLS_IF, rt->rt_vpls_dev->ifindex))
+			goto nla_put_failure;
+	if (rt->rt_vpls_flags)
+		if (nla_put_u8(skb, RTA_VPLS_FLAGS, rt->rt_vpls_flags))
 			goto nla_put_failure;
 
 	if (nh->nh_labels &&

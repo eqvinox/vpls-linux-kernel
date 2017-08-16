@@ -79,11 +79,6 @@ enum mpls_payload_type {
 	MPT_VPLS = 2,	/* pseudowire */
 	MPT_IPV4 = 4,
 	MPT_IPV6 = 6,
-
-	/* Other types not implemented:
-	 *  - Pseudo-wire with or without control word (RFC4385)
-	 *  - GAL (RFC5586)
-	 */
 };
 
 struct mpls_nh { /* next hop label forwarding entry */
@@ -153,7 +148,8 @@ struct mpls_route { /* next hop label forwarding entry */
 	u8			rt_nhn_alive;
 	u8			rt_nh_size;
 	u8			rt_via_offset;
-	u8			rt_reserved1;
+
+	u8			rt_vpls_flags;
 	struct net_device	*rt_vpls_dev;
 
 	struct mpls_nh		rt_nh[0];

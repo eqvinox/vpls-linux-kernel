@@ -327,6 +327,7 @@ enum rtattr_type_t {
 	RTA_UID,
 	RTA_TTL_PROPAGATE,
 	RTA_VPLS_IF,
+	RTA_VPLS_FLAGS,
 	__RTA_MAX
 };
 
@@ -334,6 +335,9 @@ enum rtattr_type_t {
 
 #define RTM_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct rtmsg))))
 #define RTM_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct rtmsg))
+
+#define RTA_VPLS_F_CW_RX	(1 << 0)
+#define RTA_VPLS_F_CW_TX	(1 << 1)
 
 /* RTM_MULTIPATH --- array of struct rtnexthop.
  *
