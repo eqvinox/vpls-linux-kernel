@@ -10,11 +10,27 @@ enum metadata_type {
 	METADATA_IP_TUNNEL,
 	METADATA_HW_PORT_MUX,
 	METADATA_VPLS,
+	METADATA_MULTI,
 };
 
 struct hw_port_info {
 	struct net_device *lower_dev;
 	u32 port_id;
+};
+
+struct metadata_dst;
+
+/* this is used when something aggregated multiple metadata dsts,
+ * specifically the bridge layer for multicast snooping.
+ * implication is that a transmit is related to more than one meta-dst
+ * (remote tunnel endpoint, wifi client, etc.) on the same device.
+ *
+ * user (e.g. bridge) must hold a ref on each of the dst entries,
+ * note this is not released on a plain dst_release().
+ */
+struct metadata_multi {
+	size_t count;
+	struct metadata_dst *dsts[0];
 };
 
 struct metadata_dst {
@@ -24,6 +40,7 @@ struct metadata_dst {
 		struct ip_tunnel_info	tun_info;
 		struct hw_port_info	port_info;
 		struct vpls_info	vpls_info;
+		struct metadata_multi	multi;
 	} u;
 };
 
@@ -62,6 +79,14 @@ static inline struct vpls_info *skb_vpls_info(struct sk_buff *skb)
 	struct metadata_dst *md_dst = skb_metadata_dst(skb);
 	if (md_dst && md_dst->type == METADATA_VPLS)
 		return &md_dst->u.vpls_info;
+	return NULL;
+}
+
+static inline struct metadata_multi *skb_multi_info(struct sk_buff *skb)
+{
+	struct metadata_dst *md_dst = skb_metadata_dst(skb);
+	if (md_dst && md_dst->type == METADATA_MULTI)
+		return &md_dst->u.multi;
 	return NULL;
 }
 

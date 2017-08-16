@@ -298,10 +298,23 @@ EXPORT_SYMBOL_GPL(metadata_dst_alloc);
 
 void metadata_dst_free(struct metadata_dst *md_dst)
 {
+	size_t i;
+
+	switch (md_dst->type) {
+	case METADATA_IP_TUNNEL:
 #ifdef CONFIG_DST_CACHE
-	if (md_dst->type == METADATA_IP_TUNNEL)
-		dst_cache_destroy(&md_dst->u.tun_info.dst_cache);
+		if (md_dst->type == METADATA_IP_TUNNEL)
+			dst_cache_destroy(&md_dst->u.tun_info.dst_cache);
 #endif
+		break;
+	case METADATA_MULTI:
+		for (i = 0; i < md_dst->u.multi.count; i++)
+			dst_release(&md_dst->u.multi.dsts[i]->dst);
+		break;
+	default:
+		break;
+	}
+
 	kfree(md_dst);
 }
 

@@ -228,6 +228,8 @@ void br_multicast_free_pg(struct rcu_head *head)
 	struct net_bridge_port_group *p =
 		container_of(head, struct net_bridge_port_group, rcu);
 
+	dst_release_immediate(&p->md_dst->dst);
+
 	kfree(p);
 }
 
@@ -753,10 +755,35 @@ static bool br_port_group_equal(struct net_bridge_port_group *p,
 	return ether_addr_equal(src, p->eth_addr);
 }
 
+static struct metadata_dst *metadata_multi_extend(struct metadata_dst *old,
+						  struct metadata_dst *ins)
+{
+	struct metadata_dst *ret;
+	size_t i = 0, j;
+
+	if (!ins)
+		return old;
+
+	if (old)
+		for (; i < old->u.multi.count; i++)
+			if (!metadata_dst_cmp(old->u.multi.dsts[i], ins))
+				return old;
+
+	ret = metadata_dst_alloc((i + 1) * sizeof(ret->u.multi.dsts[0]),
+				 METADATA_MULTI, GFP_ATOMIC);
+	pr_info("metadata multi extend %p + %p => %p\n", old, ins, ret);
+	ret->u.multi.count = i + 1;
+	for (j = 0; j < i; j++)
+		ret->u.multi.dsts[j] = metadata_dst_clone(old->u.multi.dsts[j]);
+	ret->u.multi.dsts[i] = metadata_dst_clone(ins);
+	return ret;
+}
+
 static int br_multicast_add_group(struct net_bridge *br,
 				  struct net_bridge_port *port,
 				  struct br_ip *group,
-				  const unsigned char *src)
+				  const unsigned char *src,
+				  struct metadata_dst *md_dst)
 {
 	struct net_bridge_port_group __rcu **pp;
 	struct net_bridge_port_group *p;
@@ -796,6 +823,16 @@ static int br_multicast_add_group(struct net_bridge *br,
 	br_mdb_notify(br->dev, port, group, RTM_NEWMDB, 0);
 
 found:
+	if (md_dst) {
+		struct metadata_dst *old, *new;
+		old = rcu_dereference(p->md_dst);
+		new = metadata_multi_extend(old, md_dst);
+		if (new != old) {
+			rcu_assign_pointer(p->md_dst, new);
+			dst_release(&old->dst);
+		}
+	}
+
 	mod_timer(&p->timer, now + br->multicast_membership_interval);
 out:
 	err = 0;
@@ -809,7 +846,8 @@ static int br_ip4_multicast_add_group(struct net_bridge *br,
 				      struct net_bridge_port *port,
 				      __be32 group,
 				      __u16 vid,
-				      const unsigned char *src)
+				      const unsigned char *src,
+				      struct metadata_dst *md_dst)
 {
 	struct br_ip br_group;
 
@@ -820,7 +858,7 @@ static int br_ip4_multicast_add_group(struct net_bridge *br,
 	br_group.proto = htons(ETH_P_IP);
 	br_group.vid = vid;
 
-	return br_multicast_add_group(br, port, &br_group, src);
+	return br_multicast_add_group(br, port, &br_group, src, md_dst);
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -828,7 +866,8 @@ static int br_ip6_multicast_add_group(struct net_bridge *br,
 				      struct net_bridge_port *port,
 				      const struct in6_addr *group,
 				      __u16 vid,
-				      const unsigned char *src)
+				      const unsigned char *src,
+				      struct metadata_dst *md_dst)
 {
 	struct br_ip br_group;
 
@@ -839,7 +878,7 @@ static int br_ip6_multicast_add_group(struct net_bridge *br,
 	br_group.proto = htons(ETH_P_IPV6);
 	br_group.vid = vid;
 
-	return br_multicast_add_group(br, port, &br_group, src);
+	return br_multicast_add_group(br, port, &br_group, src, md_dst);
 }
 #endif
 
@@ -1159,7 +1198,7 @@ static int br_ip4_multicast_igmp3_report(struct net_bridge *br,
 			br_ip4_multicast_leave_group(br, port, group, vid, src);
 		} else {
 			err = br_ip4_multicast_add_group(br, port, group, vid,
-							 src);
+							 src, skb_metadata_dst(skb));
 			if (err)
 				break;
 		}
@@ -1231,7 +1270,7 @@ static int br_ip6_multicast_mld2_report(struct net_bridge *br,
 		} else {
 			err = br_ip6_multicast_add_group(br, port,
 							 &grec->grec_mca, vid,
-							 src);
+							 src, skb_metadata_dst(skb));
 			if (err)
 				break;
 		}
@@ -1792,7 +1831,8 @@ static int br_multicast_ipv4_rcv(struct net_bridge *br,
 	case IGMP_HOST_MEMBERSHIP_REPORT:
 	case IGMPV2_HOST_MEMBERSHIP_REPORT:
 		BR_INPUT_SKB_CB(skb)->mrouters_only = 1;
-		err = br_ip4_multicast_add_group(br, port, ih->group, vid, src);
+		err = br_ip4_multicast_add_group(br, port, ih->group, vid, src,
+						 skb_metadata_dst(skb));
 		break;
 	case IGMPV3_HOST_MEMBERSHIP_REPORT:
 		err = br_ip4_multicast_igmp3_report(br, port, skb_trimmed, vid);
@@ -1844,7 +1884,7 @@ static int br_multicast_ipv6_rcv(struct net_bridge *br,
 		src = eth_hdr(skb)->h_source;
 		BR_INPUT_SKB_CB(skb)->mrouters_only = 1;
 		err = br_ip6_multicast_add_group(br, port, &mld->mld_mca, vid,
-						 src);
+						 src, skb_metadata_dst(skb));
 		break;
 	case ICMPV6_MLD2_REPORT:
 		err = br_ip6_multicast_mld2_report(br, port, skb_trimmed, vid);
