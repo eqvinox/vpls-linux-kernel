@@ -27,6 +27,14 @@
 #define MIN_MTU 68		/* Min L3 MTU */
 #define MAX_MTU 65535		/* Max L3 MTU (arbitrary) */
 
+struct vpls_cw {
+	u8 type_flags;
+#define VPLS_CWTYPE(cw) ((cw)->type_flags & 0x0f)
+
+	u8 len;
+	u16 seqno;
+};
+
 struct vpls_wirelist {
 	struct rcu_head rcu;
 	size_t count;
@@ -52,6 +60,14 @@ static int vpls_xmit_wire(struct sk_buff *skb, struct net_device *dev,
 		return -ENOENT;
 	if (rt->rt_vpls_dev != dev)
 		return -EINVAL;
+
+	if (rt->rt_vpls_flags & RTA_VPLS_F_CW_TX) {
+		struct vpls_cw *cw;
+		if (skb_cow(skb, sizeof(*cw)))
+			return -ENOMEM;
+		cw = skb_push(skb, sizeof(*cw));
+		memset(cw, 0, sizeof(*cw));
+	}
 
 	return mpls_rt_xmit(skb, rt, dec);
 }
@@ -123,6 +139,7 @@ int vpls_rcv(struct sk_buff *skb, struct net_device *in_dev,
 	struct mpls_entry_decoded dec;
 	struct metadata_dst *md_dst;
 	struct pcpu_sw_netstats *stats;
+	void *next;
 
 	if (!dev)
 		goto drop_nodev;
@@ -133,7 +150,22 @@ int vpls_rcv(struct sk_buff *skb, struct net_device *in_dev,
 		goto drop;
 	}
 
-	skb_pull(skb, sizeof(*hdr));
+	/* bottom label is still in the skb */
+	next = skb_pull(skb, sizeof(*hdr));
+
+	if (rt->rt_vpls_flags & RTA_VPLS_F_CW_RX) {
+		struct vpls_cw *cw = next;
+		if (unlikely(!pskb_may_pull(skb, sizeof(*cw)))) {
+			dev->stats.rx_length_errors++;
+			goto drop;
+		}
+		next = skb_pull(skb, sizeof(*cw));
+
+		if (VPLS_CWTYPE(cw) != 0) {
+			/* insert MPLS OAM implementation here */
+			goto drop_nodev;
+		}
+	}
 
 	if (unlikely(!pskb_may_pull(skb, ETH_HLEN))) {
 		dev->stats.rx_length_errors++;
