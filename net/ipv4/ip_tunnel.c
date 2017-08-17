@@ -140,6 +140,7 @@ struct ip_tunnel *ip_tunnel_lookup(struct ip_tunnel_net *itn,
 
 	hlist_for_each_entry_rcu(t, head, hash_node) {
 		if ((local != t->parms.iph.saddr || t->parms.iph.daddr != 0) &&
+		    (local != t->parms.iph.saddr || !ipv4_is_multicast(t->parms.iph.daddr)) &&
 		    (local != t->parms.iph.daddr || !ipv4_is_multicast(local)))
 			continue;
 
