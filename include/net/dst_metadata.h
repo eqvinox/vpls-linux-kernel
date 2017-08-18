@@ -11,11 +11,17 @@ enum metadata_type {
 	METADATA_HW_PORT_MUX,
 	METADATA_VPLS,
 	METADATA_MULTI,
+	METADATA_IEEE80211,
 };
 
 struct hw_port_info {
 	struct net_device *lower_dev;
 	u32 port_id;
+};
+
+/* ieee80211_info is confusing with 802.11 IE (information elements) */
+struct ieee80211_meta {
+	u8 sta_addr[6];
 };
 
 struct metadata_dst;
@@ -40,6 +46,7 @@ struct metadata_dst {
 		struct ip_tunnel_info	tun_info;
 		struct hw_port_info	port_info;
 		struct vpls_info	vpls_info;
+		struct ieee80211_meta	ieee80211_meta;
 		struct metadata_multi	multi;
 	} u;
 };
@@ -114,6 +121,9 @@ static inline int metadata_dst_cmp(const struct metadata_dst *a,
 	case METADATA_VPLS:
 		return memcmp(&a->u.vpls_info, &b->u.vpls_info,
 			      sizeof(a->u.vpls_info));
+	case METADATA_IEEE80211:
+		return memcmp(&a->u.ieee80211_meta, &b->u.ieee80211_meta,
+			      sizeof(a->u.ieee80211_meta));
 	case METADATA_IP_TUNNEL:
 		return memcmp(&a->u.tun_info, &b->u.tun_info,
 			      sizeof(a->u.tun_info) +

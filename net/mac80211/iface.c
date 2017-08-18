@@ -1817,6 +1817,9 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 			ieee80211_txq_init(sdata, NULL, txqi, 0);
 		}
 
+		/* currently useless... */
+		netif_keep_dst(ndev);
+
 		sdata->dev = ndev;
 	}
 
