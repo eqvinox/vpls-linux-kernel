@@ -22,6 +22,7 @@
 #include <linux/bitops.h>
 #include <net/mac80211.h>
 #include <net/ieee80211_radiotap.h>
+#include <net/dst_metadata.h>
 #include <asm/unaligned.h>
 
 #include "ieee80211_i.h"
@@ -2589,6 +2590,7 @@ ieee80211_rx_h_data(struct ieee80211_rx_data *rx)
 	struct net_device *dev = sdata->dev;
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)rx->skb->data;
 	__le16 fc = hdr->frame_control;
+	struct metadata_dst *md_dst;
 	bool port_control;
 	int err;
 
@@ -2647,6 +2649,9 @@ ieee80211_rx_h_data(struct ieee80211_rx_data *rx)
 	}
 
 	rx->skb->dev = dev;
+	md_dst = metadata_dst_alloc(0, METADATA_IEEE80211, GFP_ATOMIC);
+	memcpy(md_dst->u.ieee80211_meta.sta_addr, rx->sta->addr, ETH_ALEN);
+	skb_dst_set(rx->skb, &md_dst->dst);
 
 	if (!ieee80211_hw_check(&local->hw, SUPPORTS_DYNAMIC_PS) &&
 	    local->ps_sdata && local->hw.conf.dynamic_ps_timeout > 0 &&
