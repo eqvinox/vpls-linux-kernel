@@ -17,6 +17,8 @@
 #include <linux/if_arp.h>
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
+#include <linux/lwtunnel.h>
+#include <net/dst_metadata.h>
 #include <net/mac80211.h>
 #include <net/ieee80211_radiotap.h>
 #include "ieee80211_i.h"
@@ -1166,6 +1168,19 @@ ieee80211_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 	}
 }
 
+static int ieee80211_metadst_fill(struct sk_buff *skb,
+				  struct metadata_dst *md_dst)
+{
+	struct ieee80211_meta *meta;
+	if (md_dst->type != METADATA_IEEE80211)
+		return 0;
+
+	meta = &md_dst->u.ieee80211_meta;
+	if (nla_put(skb, LWT_IEEE80211_STA_ADDR, ETH_ALEN, meta->sta_addr))
+		return -ENOMEM;
+	return LWTUNNEL_ENCAP_IEEE80211;
+}
+
 static const struct net_device_ops ieee80211_dataif_ops = {
 	.ndo_open		= ieee80211_open,
 	.ndo_stop		= ieee80211_stop,
@@ -1175,6 +1190,7 @@ static const struct net_device_ops ieee80211_dataif_ops = {
 	.ndo_set_mac_address 	= ieee80211_change_mac,
 	.ndo_select_queue	= ieee80211_netdev_select_queue,
 	.ndo_get_stats64	= ieee80211_get_stats64,
+	.ndo_metadst_fill	= ieee80211_metadst_fill,
 };
 
 static u16 ieee80211_monitor_select_queue(struct net_device *dev,
