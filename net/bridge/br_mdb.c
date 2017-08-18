@@ -74,6 +74,54 @@ static void __mdb_entry_to_br_ip(struct br_mdb_entry *entry, struct br_ip *ip)
 #endif
 }
 
+static int put_metas(struct sk_buff *skb, struct net_bridge_port_group *pg)
+{
+	struct metadata_dst *md_dst;
+	struct net_device *dev;
+	u16 type;
+	size_t i;
+	struct nlattr *encap, *item;
+
+	dev = pg->port->dev;
+	if (!dev || !dev->netdev_ops || !dev->netdev_ops->ndo_metadst_fill)
+		return 0;
+
+	md_dst = rcu_dereference(pg->md_dst);
+	if (!md_dst || md_dst->type != METADATA_MULTI)
+		return 0;
+
+	encap = nla_nest_start(skb, MDBA_MDB_EATTR_ENCAP);
+	if (!encap)
+		return -EMSGSIZE;
+
+	for (i = 0; i < md_dst->u.multi.count; i++) {
+		struct metadata_dst *md_item = md_dst->u.multi.dsts[i];
+		int itype;
+
+		item = nla_nest_start(skb, i);
+		if (!item)
+			goto out_encap;
+		itype = dev->netdev_ops->ndo_metadst_fill(skb, md_item);
+		if (itype < 0) {
+			nla_nest_cancel(skb, item);
+			goto out_encap;
+		}
+		nla_nest_end(skb, item);
+
+		if (itype > 0)
+			type = itype;
+	}
+	nla_nest_end(skb, encap);
+
+	if (nla_put_u32(skb, MDBA_MDB_EATTR_ENCAP_TYPE, type))
+		return -EMSGSIZE;
+	return 0;
+
+out_encap:
+	nla_nest_cancel(skb, encap);
+	return -EMSGSIZE;
+}
+
 static int br_mdb_fill_info(struct sk_buff *skb, struct netlink_callback *cb,
 			    struct net_device *dev)
 {
@@ -141,7 +189,8 @@ static int br_mdb_fill_info(struct sk_buff *skb, struct netlink_callback *cb,
 				if (nla_put_nohdr(skb, sizeof(e), &e) ||
 				    nla_put_u32(skb,
 						MDBA_MDB_EATTR_TIMER,
-						br_timer_value(&p->timer))) {
+						br_timer_value(&p->timer)) ||
+				    put_metas(skb, p)) {
 					nla_nest_cancel(skb, nest_ent);
 					nla_nest_cancel(skb, nest2);
 					err = -EMSGSIZE;
