@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <net/dst_metadata.h>
 #include <net/ip_tunnels.h>
+#include <linux/lwtunnel.h>
 
 #include "internal.h"
 
@@ -353,6 +354,51 @@ static void vpls_dev_free(struct net_device *dev)
 	free_netdev(dev);
 }
 
+static const struct nla_policy vpls_meta_policy[LWT_PSEUDOWIRE_MAX + 1] = {
+	[LWT_PSEUDOWIRE_LOCAL_LABEL]	= { .type = NLA_U32 },
+};
+
+static int vpls_fill_metadst(struct sk_buff *skb, struct metadata_dst *md_dst)
+{
+	struct vpls_info *vi;
+	if (md_dst->type != METADATA_VPLS)
+		return 0;
+
+	vi = &md_dst->u.vpls_info;
+	if (nla_put_u32(skb, LWT_PSEUDOWIRE_LOCAL_LABEL, vi->pw_label))
+		return -ENOMEM;
+	return LWTUNNEL_ENCAP_PSEUDOWIRE;
+}
+
+static int vpls_build_metadst(struct net_device *dev, struct nlattr *meta,
+			      struct metadata_dst **dst,
+			      struct netlink_ext_ack *extack)
+{
+	struct nlattr *tb[LWT_PSEUDOWIRE_MAX + 1];
+	struct metadata_dst *rv;
+	int err;
+	unsigned wire;
+
+	err = nla_parse_nested(tb, LWT_PSEUDOWIRE_MAX, meta,
+			       vpls_meta_policy, extack);
+	if (err < 0)
+		return err;
+
+	if (!tb[LWT_PSEUDOWIRE_LOCAL_LABEL])
+		return -EINVAL;
+	wire = nla_get_u32(tb[LWT_PSEUDOWIRE_LOCAL_LABEL]);
+	if (wire < MPLS_LABEL_FIRST_UNRESERVED)
+		return -EINVAL;
+
+	rv = vpls_rx_dst();
+	if (!rv)
+		return -ENOMEM;
+	rv->u.vpls_info.pw_label = wire;
+
+	*dst = rv;
+	return 0;
+}
+
 static const struct net_device_ops vpls_netdev_ops = {
 	.ndo_init		= vpls_dev_init,
 	.ndo_open		= vpls_open,
@@ -363,6 +409,8 @@ static const struct net_device_ops vpls_netdev_ops = {
 	.ndo_set_rx_mode	= vpls_set_multicast_list,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_features_check	= passthru_features_check,
+	.ndo_metadst_fill	= vpls_fill_metadst,
+	.ndo_metadst_build	= vpls_build_metadst,
 };
 
 int is_vpls_dev(struct net_device *dev)

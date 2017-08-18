@@ -49,6 +49,7 @@ static const char *lwtunnel_encap_str(enum lwtunnel_encap_types encap_type)
 	case LWTUNNEL_ENCAP_IP6:
 	case LWTUNNEL_ENCAP_IP:
 	case LWTUNNEL_ENCAP_NONE:
+	case LWTUNNEL_ENCAP_PSEUDOWIRE:
 	case __LWTUNNEL_ENCAP_MAX:
 		/* should not have got here */
 		WARN_ON(1);
