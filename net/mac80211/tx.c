@@ -22,6 +22,7 @@
 #include <linux/rcupdate.h>
 #include <linux/export.h>
 #include <net/net_namespace.h>
+#include <net/dst_metadata.h>
 #include <net/ieee80211_radiotap.h>
 #include <net/cfg80211.h>
 #include <net/mac80211.h>
@@ -3554,11 +3555,28 @@ void __ieee80211_subif_start_xmit(struct sk_buff *skb,
 
 	next = skb;
 	while (next) {
+		struct metadata_multi *multi_dst;
+
 		skb = next;
 		next = skb->next;
 
 		skb->prev = NULL;
 		skb->next = NULL;
+
+		multi_dst = skb_multi_info(skb);
+		if (multi_dst) {
+			char buf[256], *pos = buf;
+			size_t i;
+			for (i = 0; i < multi_dst->count; i++) {
+				struct metadata_dst *md_dst = multi_dst->dsts[i];
+				if (md_dst->type != METADATA_IEEE80211)
+					continue;
+				snprintf(pos, buf + sizeof(buf) - pos,
+					" %pM", md_dst->u.ieee80211_meta.sta_addr);
+				pos += strlen(pos);
+			}
+			netdev_info(dev, "multi-dst TX:%s\n", buf);
+		}
 
 		skb = ieee80211_build_hdr(sdata, skb, info_flags, sta);
 		if (IS_ERR(skb))
