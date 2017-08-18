@@ -12,6 +12,7 @@
 #include <linux/random.h>
 #include <linux/moduleparam.h>
 #include <linux/ieee80211.h>
+#include <net/dst_metadata.h>
 #include <net/mac80211.h>
 #include "rate.h"
 #include "sta_info.h"
@@ -1029,6 +1030,67 @@ minstrel_get_sample_rate(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	return sample_idx;
 }
 
+static bool use_mcast_rate(struct ieee80211_tx_rate_control *txrc)
+{
+	struct sk_buff *skb = txrc->skb;
+	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
+	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+	__le16 fc;
+
+	fc = hdr->frame_control;
+
+	return (info->flags & IEEE80211_TX_CTL_NO_ACK) &&
+		ieee80211_is_data(fc);
+}
+
+static void
+rate_control_multicast(struct ieee80211_tx_rate_control *txrc,
+		       struct metadata_multi *multi_dst)
+{
+	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(txrc->skb);
+	struct ieee80211_tx_rate *rate = &info->status.rates[0];
+	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(txrc->skb->dev);
+	size_t i;
+	unsigned valid = 0;
+	struct sta_info *sta;
+	struct minstrel_ht_sta_priv *msp;
+	struct minstrel_ht_sta *mi;
+	u16 all_rate = 0;
+
+	for (i = 0; i < multi_dst->count; i++) {
+		struct metadata_dst *md_dst = multi_dst->dsts[i];
+		if (md_dst->type != METADATA_IEEE80211)
+			continue;
+
+		sta = sta_info_get_bss(sdata, md_dst->u.ieee80211_meta.sta_addr);
+		if (!sta)
+			continue;
+		if (!(sta && test_sta_flag(sta, WLAN_STA_RATE_CONTROL)))
+			continue;
+
+		msp = sta->rate_ctrl_priv;
+		mi = &msp->ht;
+
+		netdev_info(sdata->dev, "rc %pM => rate #%u\n",
+				md_dst->u.ieee80211_meta.sta_addr,
+				mi->max_tp_rate[0]);
+		if (!valid || mi->max_tp_rate[0] < all_rate)
+			all_rate = mi->max_tp_rate[0];
+
+		valid++;
+	}
+
+	if (!valid) {
+		rate_control_send_low(NULL, NULL, txrc);
+		return;
+	}
+
+	netdev_info(sdata->dev, "result rate #%u\n", all_rate);
+
+	rate->idx = all_rate;
+	rate->count = 1;
+}
+
 static void
 minstrel_ht_get_rate(void *priv, struct ieee80211_sta *sta, void *priv_sta,
                      struct ieee80211_tx_rate_control *txrc)
@@ -1040,6 +1102,16 @@ minstrel_ht_get_rate(void *priv, struct ieee80211_sta *sta, void *priv_sta,
 	struct minstrel_ht_sta *mi = &msp->ht;
 	struct minstrel_priv *mp = priv;
 	int sample_idx;
+
+	if (use_mcast_rate(txrc)) {
+		struct metadata_multi *multi_dst;
+		multi_dst = skb_multi_info(txrc->skb);
+
+		if (multi_dst) {
+			rate_control_multicast(txrc, multi_dst);
+			return;
+		}
+	}
 
 	if (rate_control_send_low(sta, priv_sta, txrc))
 		return;
