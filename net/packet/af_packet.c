@@ -71,6 +71,8 @@
 #include <net/protocol.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
+#include <net/dst_metadata.h>
+#include <linux/neighbour.h>
 #include <linux/errno.h>
 #include <linux/timer.h>
 #include <linux/uaccess.h>
@@ -2140,7 +2142,17 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	skb_set_owner_r(skb, sk);
 	skb->dev = NULL;
-	skb_dst_drop(skb);
+
+	if (po->metadata) {
+		struct metadata_dst *md_dst = skb_metadata_dst(skb);
+		if (md_dst) {
+			skb_dst_force(skb);
+		} else {
+			skb_dst_drop(skb);
+		}
+	} else {
+		skb_dst_drop(skb);
+	}
 
 	/* drop conntrack reference */
 	nf_reset(skb);
@@ -3388,6 +3400,45 @@ static int packet_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 		put_cmsg(msg, SOL_PACKET, PACKET_AUXDATA, sizeof(aux), &aux);
 	}
 
+	if (pkt_sk(sk)->metadata) {
+		struct sockaddr_ll *sll = &PACKET_SKB_CB(skb)->sa.ll;
+		struct metadata_dst *md_dst = skb_metadata_dst(skb);
+		struct net_device *dev = skb->dev;
+		struct sk_buff *nl_skb;
+		struct nlattr *nest;
+		int ret;
+
+		rcu_read_lock();
+		if (!md_dst)
+			goto out_meta;
+		dev = dev_get_by_index_rcu(sock_net(sk), sll->sll_ifindex);
+		if (!dev || !dev->netdev_ops ||
+		    !dev->netdev_ops->ndo_metadst_fill)
+			goto out_meta;
+
+		nl_skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
+
+		nest = nla_nest_start(nl_skb, NDA_ENCAP);
+		if (!nest)
+			goto out_meta_free;
+
+		ret = dev->netdev_ops->ndo_metadst_fill(nl_skb, md_dst);
+		if (ret < 0) {
+			kfree_skb(nl_skb);
+			goto out_meta_free;
+		}
+		nla_nest_end(nl_skb, nest);
+		if (nla_put_u16(nl_skb, NDA_ENCAP_TYPE, ret))
+			goto out_meta_free;
+
+		put_cmsg(msg, SOL_PACKET, PACKET_METADATA,
+			 nl_skb->len, nl_skb->data);
+out_meta_free:
+		kfree_skb(nl_skb);
+out_meta:
+		rcu_read_unlock();
+	}
+
 	/*
 	 *	Free or return the buffer as appropriate. Again this
 	 *	hides all the races and re-entrancy issues from us.
@@ -3737,6 +3788,18 @@ packet_setsockopt(struct socket *sock, int level, int optname, char __user *optv
 		po->auxdata = !!val;
 		return 0;
 	}
+	case PACKET_METADATA:
+	{
+		int val;
+
+		if (optlen < sizeof(val))
+			return -EINVAL;
+		if (copy_from_user(&val, optval, sizeof(val)))
+			return -EFAULT;
+
+		po->metadata = !!val;
+		return 0;
+	}
 	case PACKET_ORIGDEV:
 	{
 		int val;
@@ -3865,6 +3928,9 @@ static int packet_getsockopt(struct socket *sock, int level, int optname,
 		break;
 	case PACKET_AUXDATA:
 		val = po->auxdata;
+		break;
+	case PACKET_METADATA:
+		val = po->metadata;
 		break;
 	case PACKET_ORIGDEV:
 		val = po->origdev;

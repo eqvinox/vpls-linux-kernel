@@ -115,7 +115,8 @@ struct packet_sock {
 	unsigned int		running:1,	/* prot_hook is attached*/
 				auxdata:1,
 				origdev:1,
-				has_vnet_hdr:1;
+				has_vnet_hdr:1,
+				metadata:1;
 	int			pressure;
 	int			ifindex;	/* bound device		*/
 	__be16			num;
