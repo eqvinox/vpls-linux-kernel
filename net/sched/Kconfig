@@ -997,6 +997,18 @@ config NET_ACT_GATE
 	  To compile this code as a module, choose M here: the
 	  module will be called act_gate.
 
+config NET_ACT_PUNT
+	tristate "Punt to userspace (AF_PACKET socket) action"
+	depends on NET_CLS_ACT
+	help
+	  Say Y here to allow place a punting point that AF_PACKET sockets
+	  can bind() to and observe or steal packets on.
+
+	  If unsure, say N.
+
+	  To compile this code as a module, choose M here: the
+	  module will be called act_punt.
+
 config NET_IFE_SKBMARK
 	tristate "Support to encoding decoding skb mark on IFE action"
 	depends on NET_ACT_IFE
