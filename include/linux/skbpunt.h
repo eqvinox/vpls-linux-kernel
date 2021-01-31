@@ -19,6 +19,7 @@
 #include <linux/refcount.h>
 #include <linux/rcupdate.h>
 #include <linux/hashtable.h>
+#include <linux/list.h>
 #include <linux/spinlock.h>
 
 struct module;
@@ -77,6 +78,7 @@ extern unsigned skb_punt(struct skbpunt_location *loc, struct sk_buff *skb,
  */
 struct skbpunt_location {
 	struct hlist_node	node;
+	struct list_head	listnode;
 
 	struct module		*owner;
 	refcount_t		refs;

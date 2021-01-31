@@ -8,12 +8,14 @@
  */
 
 #include <linux/skbpunt.h>
+
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/jhash.h>
 
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
+#include <linux/proc_fs.h>
 
 static u32 punt_id_seed;
 
@@ -135,6 +137,7 @@ EXPORT_SYMBOL_GPL(skbpunt_remove);
  */
 static DEFINE_HASHTABLE(locations, 4);
 static DEFINE_MUTEX(locations_mutex);
+static LIST_HEAD(locations_list);
 
 static inline u32 location_hkey(const char name[8])
 {
@@ -230,6 +233,7 @@ int skbpunt_register(struct skbpunt_location *loc)
 	}
 
 	hash_add(locations, &loc->node, key);
+	list_add_tail(&loc->listnode, &locations_list);
 
 out_unlock:
 	mutex_unlock(&locations_mutex);
@@ -241,16 +245,70 @@ void skbpunt_unregister(struct skbpunt_location *loc)
 	mutex_lock(&locations_mutex);
 	BUG_ON(refcount_read(&loc->refs));
 	hash_del(&loc->node);
+	list_del(&loc->listnode);
 	mutex_unlock(&locations_mutex);
 }
 
 EXPORT_SYMBOL_GPL(skbpunt_register);
 EXPORT_SYMBOL_GPL(skbpunt_unregister);
 
+#ifdef CONFIG_PROC_FS
+
+static void *punt_seq_start(struct seq_file *seq, loff_t *pos)
+	__acquires(&locations_mutex)
+{
+	mutex_lock(&locations_mutex);
+	return seq_list_start_head(&locations_list, *pos);
+}
+
+static void *punt_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	return seq_list_next(v, &locations_list, pos);
+}
+
+static void punt_seq_stop(struct seq_file *seq, void *v)
+	__releases(&locations_mutex)
+{
+	mutex_unlock(&locations_mutex);
+}
+
+static int punt_seq_show(struct seq_file *seq, void *v)
+{
+	if (v == &locations_list)
+		seq_printf(seq,
+			   "Location RefCnt\n");
+	else {
+		struct skbpunt_location *loc;
+		loc = container_of(v, struct skbpunt_location, listnode);
+
+		seq_printf(seq,
+			   "%-8.8s %-6d\n",
+			   loc->name,
+			   refcount_read(&loc->refs));
+	}
+
+	return 0;
+}
+
+static const struct seq_operations punt_seq_ops = {
+	.start	= punt_seq_start,
+	.next	= punt_seq_next,
+	.stop	= punt_seq_stop,
+	.show	= punt_seq_show,
+};
+#endif
+
 /* must be before other net initcalls, which use fs_initcall() */
 static int __init skbpunt_init(void)
 {
 	get_random_bytes(&punt_id_seed, sizeof(punt_id_seed));
+
+#ifdef CONFIG_PROC_FS
+	if (!proc_create_net("punt", 0, init_net.proc_net, &punt_seq_ops,
+			sizeof(struct seq_net_private)))
+		return -ENOMEM;
+#endif /* CONFIG_PROC_FS */
+
 	return 0;
 }
 subsys_initcall(skbpunt_init);
