@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/types.h>
 #include <linux/skbuff.h>
+#include <linux/skbpunt.h>
 #include <linux/socket.h>
 #include <linux/sysctl.h>
 #include <linux/net.h>
@@ -39,6 +40,26 @@
 
 static int label_limit = (1 << 20) - 1;
 static int ttl_max = 255;
+
+static struct skbpunt_location mpls_ttl0_punt __read_mostly = {
+	.owner = THIS_MODULE,
+	.name = "mplsttl0",
+	.infocuts = { 0 },
+};
+
+/* outgoing ifindex included in info for user ease & filtering */
+static struct skbpunt_location mpls_mtu_punt __read_mostly = {
+	.owner = THIS_MODULE,
+	.name = "mplsmtu\0",
+	.infocuts = { 4, 0 },
+};
+
+/* skb->protocol is ETH_P_IP or ETH_P_IPV6 for this one */
+static struct skbpunt_location mpls_lspping_punt __read_mostly = {
+	.owner = THIS_MODULE,
+	.name = "mplsping",
+	.infocuts = { 0 },
+};
 
 #if IS_ENABLED(CONFIG_NET_IP_TUNNEL)
 static size_t ipgre_mpls_encap_hlen(struct ip_tunnel_encap *e)
@@ -272,28 +293,37 @@ static bool mpls_egress(struct net *net, struct mpls_route *rt,
 	enum mpls_payload_type payload_type;
 	bool success = false;
 
-	/* The IPv4 code below accesses through the IPv4 header
-	 * checksum, which is 12 bytes into the packet.
-	 * The IPv6 code below accesses through the IPv6 hop limit
-	 * which is 8 bytes into the packet.
-	 *
-	 * For all supported cases there should always be at least 12
-	 * bytes of packet data present.  The IPv4 header is 20 bytes
-	 * without options and the IPv6 header is always 40 bytes
-	 * long.
-	 */
-	if (!pskb_may_pull(skb, 12))
-		return false;
-
 	payload_type = rt->rt_payload_type;
-	if (payload_type == MPT_UNSPEC)
+	if (payload_type == MPT_UNSPEC) {
+		/* IPv4 & IPv6 each access through to the dest addr below,
+		 * which is at the end of the respective headers, so that's
+		 * checked in the respective path below.
+		 */
+		if (!pskb_may_pull(skb, 1))
+			return false;
 		payload_type = ip_hdr(skb)->version;
+	}
 
 	switch (payload_type) {
 	case MPT_IPV4: {
-		struct iphdr *hdr4 = ip_hdr(skb);
+		struct iphdr *hdr4;
 		u8 new_ttl;
+
+		if (!pskb_may_pull(skb, sizeof(*hdr4)))
+			return false;
+		hdr4 = ip_hdr(skb);
 		skb->protocol = htons(ETH_P_IP);
+
+		if (ipv4_is_loopback(hdr4->daddr)) {
+			/* LSP ping (RFC8029), 127.0/8 daddr => need to hand
+			 * this packet to userspace with the labels intact
+			 *
+			 * Intentionally after changing skb->protocol in case
+			 * consumer only handles one AF.
+			 */
+			skb_punt(&mpls_lspping_punt, skb, NULL, 0);
+			return false;
+		}
 
 		/* If propagating TTL, take the decremented TTL from
 		 * the incoming MPLS header, otherwise decrement the
@@ -314,8 +344,19 @@ static bool mpls_egress(struct net *net, struct mpls_route *rt,
 		break;
 	}
 	case MPT_IPV6: {
-		struct ipv6hdr *hdr6 = ipv6_hdr(skb);
+		struct ipv6hdr *hdr6;
+
+		if (!pskb_may_pull(skb, sizeof(*hdr6)))
+			return false;
+		hdr6 = ipv6_hdr(skb);
 		skb->protocol = htons(ETH_P_IPV6);
+
+		if (ipv6_addr_v4mapped(&hdr6->daddr) &&
+		    ipv4_is_loopback(hdr6->daddr.s6_addr32[3])) {
+			/* ::ffff:127.0.0.0/104 - LSP ping, again */
+			skb_punt(&mpls_lspping_punt, skb, NULL, 0);
+			return false;
+		}
 
 		/* If propagating TTL, take the decremented TTL from
 		 * the incoming MPLS header, otherwise decrement the
@@ -405,8 +446,10 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	skb_forward_csum(skb);
 
 	/* Verify ttl is valid */
-	if (dec.ttl <= 1)
+	if (dec.ttl <= 1) {
+		skb_punt(&mpls_ttl0_punt, skb, NULL, 0);
 		goto err;
+	}
 	dec.ttl -= 1;
 
 	/* Find the output device */
@@ -417,8 +460,12 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	/* Verify the destination can hold the packet */
 	new_header_size = mpls_nh_header_size(nh);
 	mtu = mpls_dev_mtu(out_dev);
-	if (mpls_pkt_too_big(skb, mtu - new_header_size))
+	if (mpls_pkt_too_big(skb, mtu - new_header_size)) {
+		u32 ifindex = out_dev->ifindex;
+
+		skb_punt(&mpls_mtu_punt, skb, (u8 *)&ifindex, sizeof(ifindex));
 		goto tx_err;
+	}
 
 	hh_len = LL_RESERVED_SPACE(out_dev);
 	if (!out_dev->header_ops)
@@ -2729,6 +2776,16 @@ static int __init mpls_init(void)
 
 	dev_add_pack(&mpls_packet_type);
 
+	err = skbpunt_register(&mpls_ttl0_punt);
+	if (err)
+		goto out_remove_pack;
+	err = skbpunt_register(&mpls_mtu_punt);
+	if (err)
+		goto out_unreg_ttl0;
+	err = skbpunt_register(&mpls_lspping_punt);
+	if (err)
+		goto out_unreg_mtu;
+
 	rtnl_af_register(&mpls_af_ops);
 
 	rtnl_register_module(THIS_MODULE, PF_MPLS, RTM_NEWROUTE,
@@ -2748,6 +2805,12 @@ static int __init mpls_init(void)
 out:
 	return err;
 
+out_unreg_mtu:
+	skbpunt_unregister(&mpls_mtu_punt);
+out_unreg_ttl0:
+	skbpunt_unregister(&mpls_ttl0_punt);
+out_remove_pack:
+	dev_remove_pack(&mpls_packet_type);
 out_unregister_pernet:
 	unregister_pernet_subsys(&mpls_net_ops);
 	goto out;
@@ -2758,6 +2821,7 @@ static void __exit mpls_exit(void)
 {
 	rtnl_unregister_all(PF_MPLS);
 	rtnl_af_unregister(&mpls_af_ops);
+	skbpunt_unregister(&mpls_ttl0_punt);
 	dev_remove_pack(&mpls_packet_type);
 	unregister_netdevice_notifier(&mpls_dev_notifier);
 	unregister_pernet_subsys(&mpls_net_ops);
