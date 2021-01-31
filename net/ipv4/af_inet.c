@@ -92,6 +92,7 @@
 #include <linux/igmp.h>
 #include <linux/inetdevice.h>
 #include <linux/netdevice.h>
+#include <linux/skbpunt.h>
 #include <net/checksum.h>
 #include <net/ip.h>
 #include <net/protocol.h>
@@ -1934,6 +1935,12 @@ static struct packet_type ip_packet_type __read_mostly = {
 	.list_func = ip_list_rcv,
 };
 
+struct skbpunt_location ip_ttl0_punt __read_mostly = {
+	.owner = THIS_MODULE,
+	.name = "ipv4ttl0",
+	.infocuts = { 0, }
+};
+
 static int __init inet_init(void)
 {
 	struct inet_protosw *q;
@@ -1967,6 +1974,9 @@ static int __init inet_init(void)
 #ifdef CONFIG_SYSCTL
 	ip_static_sysctl_init();
 #endif
+
+	if (skbpunt_register(&ip_ttl0_punt))
+		pr_crit("%s: Cannot add TTL-0 punt point\n", __func__);
 
 	/*
 	 *	Add all the base protocols.

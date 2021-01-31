@@ -39,6 +39,7 @@
 #include <linux/route.h>
 #include <net/route.h>
 #include <net/xfrm.h>
+#include <linux/skbpunt.h>
 
 static bool ip_exceeds_mtu(const struct sk_buff *skb, unsigned int mtu)
 {
@@ -82,6 +83,8 @@ static int ip_forward_finish(struct net *net, struct sock *sk, struct sk_buff *s
 	skb->tstamp = 0;
 	return dst_output(net, sk, skb);
 }
+
+extern struct skbpunt_location ip_ttl0_punt;
 
 int ip_forward(struct sk_buff *skb)
 {
@@ -168,6 +171,10 @@ sr_failed:
 too_many_hops:
 	/* Tell the sender its packet died... */
 	__IP_INC_STATS(net, IPSTATS_MIB_INHDRERRORS);
+	{
+		if (skb_punt(&ip_ttl0_punt, skb, NULL, 0))
+			goto drop;
+	}
 	icmp_send(skb, ICMP_TIME_EXCEEDED, ICMP_EXC_TTL, 0);
 drop:
 	kfree_skb(skb);
