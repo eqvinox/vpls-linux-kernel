@@ -305,6 +305,8 @@ static void __register_prot_hook(struct sock *sk)
 	if (!po->running) {
 		if (po->fanout)
 			__fanout_link(sk, po);
+		else if (sk->sk_type == SOCK_PUNT)
+			skbpunt_add(&po->punt_hook);
 		else
 			dev_add_pack(&po->prot_hook);
 
@@ -335,6 +337,8 @@ static void __unregister_prot_hook(struct sock *sk, bool sync)
 
 	if (po->fanout)
 		__fanout_unlink(sk, po);
+	else if (sk->sk_type == SOCK_PUNT)
+		skbpunt_remove(&po->punt_hook);
 	else
 		__dev_remove_pack(&po->prot_hook);
 
@@ -1810,6 +1814,8 @@ static const struct proto_ops packet_ops;
 
 static const struct proto_ops packet_ops_spkt;
 
+static const struct proto_ops packet_ops_punt;
+
 static int packet_rcv_spkt(struct sk_buff *skb, struct net_device *dev,
 			   struct packet_type *pt, struct net_device *orig_dev)
 {
@@ -1879,7 +1885,7 @@ oom:
 static void packet_parse_headers(struct sk_buff *skb, struct socket *sock)
 {
 	if ((!skb->protocol || skb->protocol == htons(ETH_P_ALL)) &&
-	    sock->type == SOCK_RAW) {
+	    (sock->type == SOCK_RAW || sock->type == SOCK_PUNT)) {
 		skb_reset_mac_header(skb);
 		skb->protocol = dev_parse_header_protocol(skb);
 	}
@@ -2071,6 +2077,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	int skb_len = skb->len;
 	unsigned int snaplen, res;
 	bool is_drop_n_account = false;
+	int ret = 0;
 
 	if (skb->pkt_type == PACKET_LOOPBACK)
 		goto drop;
@@ -2102,8 +2109,11 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	snaplen = skb->len;
 
 	res = run_filter(skb, sk, snaplen);
-	if (!res)
+	if (!res) {
+		if (unlikely(sk->sk_type == SOCK_PUNT))
+			ret = -1;
 		goto drop_n_restore;
+	}
 	if (snaplen > res)
 		snaplen = res;
 
@@ -2173,7 +2183,7 @@ drop:
 		consume_skb(skb);
 	else
 		kfree_skb(skb);
-	return 0;
+	return ret;
 }
 
 static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
@@ -2195,6 +2205,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 	bool is_drop_n_account = false;
 	unsigned int slot_id = 0;
 	bool do_vnet = false;
+	int ret = 0;
 
 	/* struct tpacket{2,3}_hdr is aligned to a multiple of TPACKET_ALIGNMENT.
 	 * We may add members to them until current aligned size without forcing
@@ -2224,8 +2235,11 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 	snaplen = skb->len;
 
 	res = run_filter(skb, sk, snaplen);
-	if (!res)
+	if (!res) {
+		if (unlikely(sk->sk_type == SOCK_PUNT))
+			ret = -1;
 		goto drop_n_restore;
+	}
 
 	/* If we are flooded, just give up */
 	if (__packet_rcv_has_room(po, skb) == ROOM_NONE) {
@@ -2434,7 +2448,7 @@ drop:
 		consume_skb(skb);
 	else
 		kfree_skb(skb);
-	return 0;
+	return ret;
 
 drop_n_account:
 	spin_unlock(&sk->sk_receive_queue.lock);
@@ -2444,6 +2458,39 @@ drop_n_account:
 	sk->sk_data_ready(sk);
 	kfree_skb(copy_skb);
 	goto drop_n_restore;
+}
+
+static unsigned packet_rcv_punt(struct sk_buff *skb,
+				struct skbpunt_listener *hook,
+				struct skbpunt_state *state)
+{
+	struct packet_sock *po = hook->af_packet_priv;
+	int ret;
+
+	RCU_LOCKDEP_WARN(!rcu_read_lock_held(),
+			 "packet_rcv_punt() without RCU held?");
+
+	if (unlikely(sock_flag(&po->sk, SOCK_DEAD)))
+		return 0;
+
+	/* packet_rcv messes with shared SKBs, but for skb_punt we can't be
+	 * sure the current CPU owns the SKB, so make a clone here.
+	 */
+	if (!state->af_packet_skb) {
+		state->af_packet_skb = skb_clone(skb, GFP_ATOMIC);
+
+		if (state->af_packet_skb->pkt_type == PACKET_LOOPBACK)
+			state->af_packet_skb->pkt_type = PACKET_USER;
+	}
+
+	skb = state->af_packet_skb;
+
+	/* if BPF rejects the packet, we get ret = -1 here */
+	ret = po->prot_hook.func(skb_get(skb), skb->dev, &po->prot_hook, skb->dev);
+	if (po->punt_consume && ret == 0)
+		return 1;
+
+	return 0;
 }
 
 static void tpacket_destruct_skb(struct sk_buff *skb)
@@ -2707,7 +2754,7 @@ static int tpacket_snd(struct packet_sock *po, struct msghdr *msg)
 			goto out_put;
 	}
 
-	if (po->sk.sk_socket->type == SOCK_RAW)
+	if (po->sk.sk_socket->type == SOCK_RAW || po->sk.sk_socket->type == SOCK_PUNT)
 		reserve = dev->hard_header_len;
 	size_max = po->tx_ring.frame_size
 		- (po->tp_hdrlen - sizeof(struct sockaddr_ll));
@@ -2919,7 +2966,7 @@ static int packet_snd(struct socket *sock, struct msghdr *msg, size_t len)
 			goto out_unlock;
 	}
 
-	if (sock->type == SOCK_RAW)
+	if (sock->type == SOCK_RAW || sock->type == SOCK_PUNT)
 		reserve = dev->hard_header_len;
 	if (po->has_vnet_hdr) {
 		err = packet_snd_vnet_parse(msg, &len, &vnet_hdr);
@@ -2970,7 +3017,7 @@ static int packet_snd(struct socket *sock, struct msghdr *msg, size_t len)
 	if (err)
 		goto out_free;
 
-	if (sock->type == SOCK_RAW &&
+	if ((sock->type == SOCK_RAW || sock->type == SOCK_PUNT) &&
 	    !dev_validate_header(dev, skb->data, len)) {
 		err = -EINVAL;
 		goto out_free;
@@ -3067,6 +3114,9 @@ static int packet_release(struct socket *sock)
 		po->prot_hook.dev = NULL;
 	}
 	spin_unlock(&po->bind_lock);
+
+	skbpunt_put(po->punt_hook.loc);
+	po->punt_hook.loc = NULL;
 
 	packet_flush_mclist(sk);
 
@@ -3204,6 +3254,56 @@ out_unlock:
 	return ret;
 }
 
+static int packet_punt_do_bind(struct sock *sk, struct sockaddr_punt *addr,
+			       struct skbpunt_location *loc)
+{
+	struct packet_sock *po = pkt_sk(sk);
+	int ret = 0;
+
+	lock_sock(sk);
+	spin_lock(&po->bind_lock);
+	rcu_read_lock();
+
+	if (po->fanout) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (po->running) {
+		rcu_read_unlock();
+
+		__unregister_prot_hook(sk, true);
+
+		rcu_read_lock();
+
+		BUG_ON(po->running);
+	}
+
+	skbpunt_put(po->punt_hook.loc);
+	po->num = 0;
+	po->punt_hook.protocol = 0;
+	po->punt_hook.loc = loc;
+	po->punt_hook.info_len = 0;
+	memset(po->punt_hook.info, 0, sizeof(po->punt_hook.info));
+
+	if (!loc)
+		goto out_unlock;
+
+	po->num = addr->spunt_protocol;
+	po->punt_hook.protocol = po->num;
+	po->punt_hook.info_len = addr->spunt_halen - sizeof(addr->spunt_location);
+	BUG_ON(po->punt_hook.info_len > sizeof(po->punt_hook.info));
+	memcpy(po->punt_hook.info, addr->spunt_info, po->punt_hook.info_len);
+
+	register_prot_hook(sk);
+
+out_unlock:
+	rcu_read_unlock();
+	spin_unlock(&po->bind_lock);
+	release_sock(sk);
+	return ret;
+}
+
 /*
  *	Bind a packet socket to a device
  */
@@ -3247,6 +3347,54 @@ static int packet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len
 			      sll->sll_protocol ? : pkt_sk(sk)->num);
 }
 
+static int packet_bind_punt(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+{
+	struct sock *sk = sock->sk;
+	struct sockaddr_punt *spunt = (struct sockaddr_punt *)uaddr;
+	struct skbpunt_location *loc;
+	int err;
+
+	BUILD_BUG_ON(offsetof(struct sockaddr_punt, spunt_info) != sizeof(struct sockaddr_ll));
+	BUILD_BUG_ON(sizeof(struct sockaddr_punt) > sizeof(struct sockaddr_storage));
+	BUILD_BUG_ON(sizeof(spunt->spunt_info) != SKBPUNT_MAXINFOLEN);
+
+	if (addr_len < offsetof(struct sockaddr_punt, spunt_info))
+		return -EINVAL;
+	if (addr_len > sizeof(struct sockaddr_punt))
+		return -EINVAL;
+	if (spunt->spunt_family != AF_PACKET)
+		return -EINVAL;
+	if (!spunt->spunt_protocol)
+		return packet_punt_do_bind(sk, spunt, NULL);
+
+	if (spunt->spunt_protocol != htons(ETH_P_ALL))
+		return -EINVAL;
+	if (spunt->spunt_hatype != ARPHRD_VOID)
+		return -EINVAL;
+
+	if (addr_len != spunt->spunt_halen + offsetof(struct sockaddr_punt, spunt_location))
+		return -EINVAL;
+	if (spunt->spunt_halen < 8)
+		return -EINVAL;
+
+	loc = skbpunt_get(spunt->spunt_location);
+	if (!loc)
+		return -ENOENT;
+
+	err = skbpunt_check_info(loc, spunt->spunt_info, spunt->spunt_halen - 8);
+	if (err)
+		goto out_put;
+
+	err = packet_punt_do_bind(sk, spunt, loc);
+	if (err)
+		goto out_put;
+	return 0;
+
+out_put:
+	skbpunt_put(loc);
+	return err;
+}
+
 static struct proto packet_proto = {
 	.name	  = "PACKET",
 	.owner	  = THIS_MODULE,
@@ -3268,7 +3416,7 @@ static int packet_create(struct net *net, struct socket *sock, int protocol,
 	if (!ns_capable(net->user_ns, CAP_NET_RAW))
 		return -EPERM;
 	if (sock->type != SOCK_DGRAM && sock->type != SOCK_RAW &&
-	    sock->type != SOCK_PACKET)
+	    sock->type != SOCK_PACKET && sock->type != SOCK_PUNT)
 		return -ESOCKTNOSUPPORT;
 
 	sock->state = SS_UNCONNECTED;
@@ -3281,6 +3429,8 @@ static int packet_create(struct net *net, struct socket *sock, int protocol,
 	sock->ops = &packet_ops;
 	if (sock->type == SOCK_PACKET)
 		sock->ops = &packet_ops_spkt;
+	else if (sock->type == SOCK_PUNT)
+		sock->ops = &packet_ops_punt;
 
 	sock_init_data(sock, sk);
 
@@ -3307,13 +3457,16 @@ static int packet_create(struct net *net, struct socket *sock, int protocol,
 	mutex_init(&po->pg_vec_lock);
 	po->rollover = NULL;
 	po->prot_hook.func = packet_rcv;
+	po->punt_hook.func = packet_rcv_punt;
 
 	if (sock->type == SOCK_PACKET)
 		po->prot_hook.func = packet_rcv_spkt;
 
 	po->prot_hook.af_packet_priv = sk;
+	po->punt_hook.af_packet_priv = sk;
+	po->punt_hook.net = net;
 
-	if (proto) {
+	if (proto && sock->type != SOCK_PUNT) {
 		po->prot_hook.type = proto;
 		__register_prot_hook(sk);
 	}
@@ -3531,6 +3684,33 @@ static int packet_getname(struct socket *sock, struct sockaddr *uaddr,
 	return offsetof(struct sockaddr_ll, sll_addr) + sll->sll_halen;
 }
 
+static int packet_getname_punt(struct socket *sock, struct sockaddr *uaddr,
+			       int peer)
+{
+	struct sock *sk = sock->sk;
+	struct packet_sock *po = pkt_sk(sk);
+	DECLARE_SOCKADDR(struct sockaddr_punt *, spunt, uaddr);
+
+	if (peer)
+		return -EOPNOTSUPP;
+
+	spunt->spunt_family = AF_PACKET;
+	spunt->spunt_ifindex = 0;
+	spunt->spunt_hatype = 0;
+	spunt->spunt_pkttype = 0;
+	if (po->punt_hook.loc) {
+		spunt->spunt_protocol = htons(ETH_P_ALL);
+		spunt->spunt_halen = 8 + po->punt_hook.info_len;
+		memcpy(spunt->spunt_location, po->punt_hook.loc->name, 8);
+		memcpy(spunt->spunt_info, po->punt_hook.info, po->punt_hook.info_len);
+	} else {
+		spunt->spunt_protocol = 0;
+		spunt->spunt_halen = 0;
+	}
+
+	return offsetof(struct sockaddr_punt, spunt_location) + spunt->spunt_halen;
+}
+
 static int packet_dev_mc(struct net_device *dev, struct packet_mclist *i,
 			 int what)
 {
@@ -3695,6 +3875,8 @@ packet_setsockopt(struct socket *sock, int level, int optname, sockptr_t optval,
 	{
 		struct packet_mreq_max mreq;
 		int len = optlen;
+		if (sock->type == SOCK_PUNT)
+			return -EINVAL;
 		memset(&mreq, 0, sizeof(mreq));
 		if (len < sizeof(struct packet_mreq))
 			return -EINVAL;
@@ -3882,6 +4064,8 @@ packet_setsockopt(struct socket *sock, int level, int optname, sockptr_t optval,
 	{
 		struct fanout_args args = { 0 };
 
+		if (sock->type == SOCK_PUNT)
+			return -EINVAL;
 		if (optlen != sizeof(int) && optlen != sizeof(args))
 			return -EINVAL;
 		if (copy_from_sockptr(&args, optval, optlen))
@@ -3900,6 +4084,8 @@ packet_setsockopt(struct socket *sock, int level, int optname, sockptr_t optval,
 	{
 		int val;
 
+		if (sock->type == SOCK_PUNT)
+			return -EINVAL;
 		if (optlen != sizeof(val))
 			return -EINVAL;
 		if (copy_from_sockptr(&val, optval, sizeof(val)))
@@ -3939,6 +4125,18 @@ packet_setsockopt(struct socket *sock, int level, int optname, sockptr_t optval,
 			return -EFAULT;
 
 		po->xmit = val ? packet_direct_xmit : dev_queue_xmit;
+		return 0;
+	}
+	case PACKET_PUNT_CONSUME:
+	{
+		int val;
+
+		if (optlen != sizeof(val))
+			return -EINVAL;
+		if (copy_from_sockptr(&val, optval, sizeof(val)))
+			return -EFAULT;
+
+		po->punt_consume = !!val;
 		return 0;
 	}
 	default:
@@ -4054,6 +4252,9 @@ static int packet_getsockopt(struct socket *sock, int level, int optname,
 		break;
 	case PACKET_QDISC_BYPASS:
 		val = packet_use_direct_xmit(po);
+		break;
+	case PACKET_PUNT_CONSUME:
+		val = po->punt_consume;
 		break;
 	default:
 		return -ENOPROTOOPT;
@@ -4558,6 +4759,29 @@ static const struct proto_ops packet_ops = {
 	.mmap =		packet_mmap,
 	.sendpage =	sock_no_sendpage,
 };
+
+static const struct proto_ops packet_ops_punt = {
+	.family =	PF_PACKET,
+	.owner =	THIS_MODULE,
+	.release =	packet_release,
+	.bind =		packet_bind_punt,
+	.connect =	sock_no_connect,
+	.socketpair =	sock_no_socketpair,
+	.accept =	sock_no_accept,
+	.getname =	packet_getname_punt,
+	.poll =		packet_poll,
+	.ioctl =	packet_ioctl,
+	.gettstamp =	sock_gettstamp,
+	.listen =	sock_no_listen,
+	.shutdown =	sock_no_shutdown,
+	.setsockopt =	packet_setsockopt,
+	.getsockopt =	packet_getsockopt,
+	.sendmsg =	packet_sendmsg,
+	.recvmsg =	packet_recvmsg,
+	.mmap =		packet_mmap,
+	.sendpage =	sock_no_sendpage,
+};
+
 
 static const struct net_proto_family packet_family_ops = {
 	.family =	PF_PACKET,

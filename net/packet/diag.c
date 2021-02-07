@@ -31,6 +31,8 @@ static int pdiag_put_info(const struct packet_sock *po, struct sk_buff *nlskb)
 		pinfo.pdi_flags |= PDI_VNETHDR;
 	if (po->tp_loss)
 		pinfo.pdi_flags |= PDI_LOSS;
+	if (po->punt_consume)
+		pinfo.pdi_flags |= PDI_PUNT_CONSUME;
 
 	return nla_put(nlskb, PACKET_DIAG_INFO, sizeof(pinfo), &pinfo);
 }
@@ -154,6 +156,16 @@ static int sk_diag_fill(struct sock *sk, struct sk_buff *skb,
 	if ((req->pdiag_show & PACKET_SHOW_INFO) &&
 	    nla_put_u32(skb, PACKET_DIAG_UID,
 			from_kuid_munged(user_ns, sock_i_uid(sk))))
+		goto out_nlmsg_trim;
+
+	if ((req->pdiag_show & PACKET_SHOW_INFO) && po->punt_hook.loc &&
+	    nla_put(skb, PACKET_DIAG_PUNT_LOC,
+		    sizeof(po->punt_hook.loc->name), po->punt_hook.loc->name))
+		goto out_nlmsg_trim;
+
+	if ((req->pdiag_show & PACKET_SHOW_INFO) && po->punt_hook.loc &&
+	    nla_put(skb, PACKET_DIAG_PUNT_INFO,
+		    po->punt_hook.info_len, po->punt_hook.info))
 		goto out_nlmsg_trim;
 
 	if ((req->pdiag_show & PACKET_SHOW_MCLIST) &&

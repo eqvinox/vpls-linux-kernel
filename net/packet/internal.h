@@ -3,6 +3,7 @@
 #define __PACKET_INTERNAL_H__
 
 #include <linux/refcount.h>
+#include <linux/skbpunt.h>
 
 struct packet_mclist {
 	struct packet_mclist	*next;
@@ -121,7 +122,8 @@ struct packet_sock {
 				origdev:1,
 				has_vnet_hdr:1,
 				tp_loss:1,
-				tp_tx_has_off:1;
+				tp_tx_has_off:1,
+				punt_consume:1;
 	int			pressure;
 	int			ifindex;	/* bound device		*/
 	__be16			num;
@@ -137,6 +139,7 @@ struct packet_sock {
 	int			(*xmit)(struct sk_buff *skb);
 	struct packet_type	prot_hook ____cacheline_aligned_in_smp;
 	atomic_t		tp_drops ____cacheline_aligned_in_smp;
+	struct skbpunt_listener	punt_hook ____cacheline_aligned_in_smp;
 };
 
 static inline struct packet_sock *pkt_sk(struct sock *sk)

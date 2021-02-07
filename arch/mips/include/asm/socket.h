@@ -34,6 +34,7 @@ enum sock_type {
 	SOCK_SEQPACKET	= 5,
 	SOCK_DCCP	= 6,
 	SOCK_PACKET	= 10,
+	SOCK_PUNT	= 11,
 };
 
 #define SOCK_MAX (SOCK_PACKET + 1)

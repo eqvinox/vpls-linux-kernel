@@ -39,6 +39,8 @@ enum {
 	PACKET_DIAG_UID,
 	PACKET_DIAG_MEMINFO,
 	PACKET_DIAG_FILTER,
+	PACKET_DIAG_PUNT_LOC,
+	PACKET_DIAG_PUNT_INFO,
 
 	__PACKET_DIAG_MAX,
 };
@@ -53,11 +55,12 @@ struct packet_diag_info {
 	__u32	pdi_tstamp;
 	__u32	pdi_flags;
 
-#define PDI_RUNNING	0x1
-#define PDI_AUXDATA	0x2
-#define PDI_ORIGDEV	0x4
-#define PDI_VNETHDR	0x8
-#define PDI_LOSS	0x10
+#define PDI_RUNNING		0x1
+#define PDI_AUXDATA		0x2
+#define PDI_ORIGDEV		0x4
+#define PDI_VNETHDR		0x8
+#define PDI_LOSS		0x10
+#define PDI_PUNT_CONSUME	0x20
 };
 
 struct packet_diag_mclist {

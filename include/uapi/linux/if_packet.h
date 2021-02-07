@@ -21,6 +21,17 @@ struct sockaddr_ll {
 	unsigned char	sll_addr[8];
 };
 
+struct sockaddr_punt {
+	unsigned short	spunt_family;		/* const: AF_PACKET */
+	__be16		spunt_protocol;
+	int		spunt_ifindex;
+	unsigned short	spunt_hatype;		/* const: ARPHRD_VOID */
+	unsigned char	spunt_pkttype;
+	unsigned char	spunt_halen;		/* depends, min 8 */
+	char		spunt_location[8];	/* string ID, e.g. "ipv4ttl0" */
+	unsigned char	spunt_info[24];		/* depends on spunt_location */
+};
+
 /* Packet types */
 
 #define PACKET_HOST		0		/* To us		*/
@@ -59,6 +70,7 @@ struct sockaddr_ll {
 #define PACKET_ROLLOVER_STATS		21
 #define PACKET_FANOUT_DATA		22
 #define PACKET_IGNORE_OUTGOING		23
+#define PACKET_PUNT_CONSUME		24
 
 #define PACKET_FANOUT_HASH		0
 #define PACKET_FANOUT_LB		1
