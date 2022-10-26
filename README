@@ -1,18 +1,101 @@
-Linux kernel
-============
+Bridge subport hack
+===================
 
-This file was moved to Documentation/admin-guide/README.rst
+As this code is 5 years old, but is now seeing some renewed interest, here is
+some context for a quick understanding of what's going on.
 
-Please notice that there are several guides for kernel developers and users.
-These guides can be rendered in a number of formats, like HTML and PDF.
+Fundamentally, this extends the bridge to optionally learn on RX a little bit
+of opaque information from the bridge port netdevs and feed it back down on TX.
+The bridge knows nothing about what the information means, it simply remembers
+it as part of FDB and MDB learning.  For the MDB, it *accumulates* unique
+opaque blobs, which implies the bridge checks for equality, but nothing else.
 
-In order to build the documentation, use ``make htmldocs`` or
-``make pdfdocs``.
+The point of the entire thing is to deal with netdevs that internally dispatch
+into multiple "paths" or "destinations".  That's primarily 802.11 APs, VXLAN
+and VPLS (the last does not currently exist in Linux).  But importantly, these
+devices do NOT want to present as multiple netdevs, because that (a) makes
+multicast handling close to impossible (because the same packet would be
+submitted on all the "disaggregated" netdevs with no good way to tie them back
+together), (b) especially for VXLAN the number of subdevices can be quite
+large, and (c) it wouldn't really fit most hardware offload models either.
 
-There are various text files in the Documentation/ subdirectory,
-several of them using the Restructured Text markup notation.
-See Documentation/00-INDEX for a list of what is contained in each file.
+To a degree, this is a multicast-only problem.  The current solution for
+unicast is that both 802.11 APs and VXLAN keep their own tables to perform
+another round of destination MAC lookups on.  They could also copy the entire
+bridge multicast snooping code, but that sounds terrible.
 
-Please read the Documentation/process/changes.rst file, as it contains the
-requirements for building and running the kernel, and information about
-the problems which may result by upgrading your kernel.
+So, that's what led up to this code.
+
+Here's otherwise important notes (from 5 year old memory, some might be off):
+
+- THIS IS PROOF OF CONCEPT LEVEL, INCOMPLETE.  I have run and tested it, and
+  it did the things I expected it to do.  But I only threw some random things
+  at it.
+
+- this code should primarily be used as a "what could this roughly look like?"
+  statement.  It's 5 years old.  Many little things could probably be done
+  much better, and probably some big things too.  My only hope is that this
+  code helps furthering the topic in general.  Even a shitty implementation is
+  useful to see the contact surface.
+
+- ignore all the MPLS/VPLS bits, and ignore that it says "bridge lwtunnel
+  support".  That was just my perspective at the time.  This is a generic
+  bridge feature: support for netdev subports.
+
+- originally, the "extra data" the bridge was keeping was just a u32.  I then
+  changed it to metadata_dst because that is a very good match functionally.
+  It is more complex.  Going back to u32 is absolutely an option.  Going to a
+  bitmap for multicast is also viable, as long as the bitmap is efficient for
+  sparse use.  99% of bitmaps will be *very* sparse.
+
+- for 802.11 APs, the original use case was multicast *optimization*, making it
+  a nice-to-have.  Ongoing 802.11 standards developments - multi-link - are now
+  making it much more of a necessity.  That's where the "2022 revival" is
+  coming from.
+
+- the 802.11 hacky code uses the STA MAC as the metadata.  I'm told the thing
+  that should be used is a 15-bit Link ID.  My 802.11 knowledge is limited :)
+
+- doing it for unicast is indeed optional.  But if it exists for unicast, the
+  entire VXLAN copy of the bridge FDB can be thrown out.  The extra table
+  lookup step in VXLAN would be gone, which could give some nice performance
+  improvements too.  Since this would be a rather large user-visible change of
+  the way VXLAN devices work, this would/should likely take the form of a new
+  "vxlan-v2" link type that does not have its own FDB.
+
+- for the MDB, the bridge needs to track IGMP/MLD membership timers on the
+  per-metadata / subport level.  That is NOT IMPLEMENTED here.  It just keeps
+  accumulating things, and only clears if the entire group goes away.  It's
+  proof of concept.
+
+- learning/keeping an unconstrained number of metadata/sub-port items for an
+  MDB entry is a denial of service / memory exhaustion surface.  However, the
+  number of possible sub-port items should be limited by the underlying
+  netdev.  802.11 only has a finite number of stations, VXLAN only has a
+  finite number of remote tunnel endpoints.  It's an issue meriting some
+  thought but not a huge problem.
+
+- some thought needs to be given to the opaque data becoming invalid on the
+  lower device (802.11 station going away / VXLAN tunnel endpoint deleted), and
+  then the same identifier gets reused.  But note that like any other ethernet
+  topology change, some packets getting mis-switched during the topology change
+  is expected to a degree.  Regular MAC learning will correct it.  Even moreso,
+  for multicast the entire thing is an optimization to *reduce* the number of
+  destinations the traffic is delivered to.  Getting multicast traffic to a few
+  places too many is not a real issue.
+
+- the userspace interface for this thing exists because there is some interest
+  in having IGMP/MLD snooping done in userspace.  The snooping daemon would
+  receive IGMP/MLD on the bridge port interfaces with the extra metadata, and
+  would program the bridge MDB entry including (multiple of) the extra
+  metadata.
+
+- the fact that this is applicable to 802.11 and VXLAN, very different types
+  of devices with the very same problem, really argues to me that this is a
+  general thing the bridge should support.  Yes it can be done by copying a
+  lot of the bridge code into 802.11 and VXLAN.  VXLAN has already done that.
+  bridge, VXLAN, 802.11, and maybe VPLS at some point would make it 4 copies
+  of the same function.
+
+
+David Lamparter, 2022-10-26
