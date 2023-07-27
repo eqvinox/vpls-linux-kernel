@@ -1092,13 +1092,13 @@ static int ip6_dst_lookup_tail(struct net *net, const struct sock *sk,
 	struct neighbour *n;
 	struct rt6_info *rt;
 #endif
-	int err;
+	int err = 0;
 	int flags = 0;
 
 	/* The correct way to handle this would be to do
-	 * ip6_route_get_saddr, and then ip6_route_output; however,
+	 * ipv6_dst_get_saddr, and then ip6_route_output; however,
 	 * the route-specific preferred source forces the
-	 * ip6_route_output call _before_ ip6_route_get_saddr.
+	 * ip6_route_output call _before_ ipv6_dst_get_saddr.
 	 *
 	 * In source specific routing (no src=any default route),
 	 * ip6_route_output will fail given src=any saddr, though, so
@@ -1113,9 +1113,12 @@ static int ip6_dst_lookup_tail(struct net *net, const struct sock *sk,
 
 		rcu_read_lock();
 		from = rt ? rcu_dereference(rt->from) : NULL;
-		err = ip6_route_get_saddr(net, from, &fl6->daddr,
-					  sk ? inet6_sk(sk)->srcprefs : 0,
-					  &fl6->saddr);
+		if (from && from->fib6_prefsrc.plen)
+			fl6->saddr = from->fib6_prefsrc.addr;
+		else
+			err = ipv6_dst_get_saddr(net, *dst, &fl6->daddr,
+						 sk ? inet6_sk(sk)->srcprefs : 0,
+						 &fl6->saddr);
 		rcu_read_unlock();
 
 		if (err)
