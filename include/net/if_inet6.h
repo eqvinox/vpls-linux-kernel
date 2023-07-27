@@ -223,6 +223,8 @@ struct inet6_dev {
 	struct rcu_head		rcu;
 
 	unsigned int		ra_mtu;
+
+	atomic_t		pio_count;	/* ip6_neigh_pio on neighbors */
 };
 
 static inline void ipv6_eth_mc_map(const struct in6_addr *addr, char *buf)

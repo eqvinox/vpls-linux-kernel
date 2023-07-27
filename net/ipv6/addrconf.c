@@ -1472,6 +1472,7 @@ enum {
 	IPV6_SADDR_RULE_HOA,
 #endif
 	IPV6_SADDR_RULE_OIF,
+	IPV6_SADDR_RULE_PIO_BY_NEXTHOP,
 	IPV6_SADDR_RULE_LABEL,
 	IPV6_SADDR_RULE_PRIVACY,
 	IPV6_SADDR_RULE_ORCHID,
@@ -1537,6 +1538,41 @@ static bool ipv6_allow_optimistic_dad(struct net *net,
 #else
 	return false;
 #endif
+}
+
+static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
+			      struct ipv6_saddr_dst *dst)
+{
+	const struct rt6_info *rt;
+	struct neighbour *n;
+	int ret = 0;
+
+	rt = container_of(dst->dst, struct rt6_info, dst);
+	rcu_read_lock();
+	n = __ipv6_neigh_lookup_noref(rt->dst.dev, rt6_nexthop(rt, dst->addr));
+	if (n) {
+		struct ip6_neigh_pio *pio;
+
+		list_for_each_entry_rcu(pio, &n->pio_list, list) {
+			unsigned long pio_expires;
+
+			pio_expires = atomic_long_read(&pio->expires);
+			if (time_before(pio_expires, jiffies))
+				continue;
+			if (ipv6_prefix_equal(&score->ifa->addr, &pio->prefix,
+					      pio->prefix_len)) {
+				pr_info("src %pI6 found on %pI6\n",
+					&score->ifa->addr, n->primary_key);
+				ret = 1;
+				break;
+			}
+		}
+		if (ret == 0)
+			pr_info("src %pI6 not found on %pI6\n",
+				&score->ifa->addr, n->primary_key);
+	}
+	rcu_read_unlock();
+	return ret;
 }
 
 static int ipv6_get_saddr_eval(struct net *net,
@@ -1622,6 +1658,13 @@ static int ipv6_get_saddr_eval(struct net *net,
 		/* Rule 5: Prefer outgoing interface */
 		ret = (!dst->ifindex ||
 		       dst->ifindex == score->ifa->idev->dev->ifindex);
+		break;
+	case IPV6_SADDR_RULE_PIO_BY_NEXTHOP:
+		/* Rule 5.5: Prefer sources advertised by chosen next-hop */
+		if (dst->dst && !dst->dst->error)
+			ret = ipv6_saddr_rule5p5(score, dst);
+		else
+			ret = 1;
 		break;
 	case IPV6_SADDR_RULE_LABEL:
 		/* Rule 6: Prefer matching label */
@@ -2731,7 +2774,105 @@ int addrconf_prefix_rcv_add_addr(struct net *net, struct net_device *dev,
 }
 EXPORT_SYMBOL_GPL(addrconf_prefix_rcv_add_addr);
 
-void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
+static void addrconf_update_neigh_pio(struct neighbour *neigh,
+				      struct prefix_info *pinfo,
+				      unsigned long expires)
+{
+	struct ip6_neigh_pio *pio = NULL, *search;
+	unsigned int total = 0;
+	unsigned long abs_expires, abs_earliest, search_expires;
+	struct in6_addr *naddr = (struct in6_addr *)&neigh->primary_key;
+
+	abs_expires = jiffies + expires;
+	abs_earliest = abs_expires;
+
+	list_for_each_entry_rcu(search, &neigh->pio_list, list) {
+		total++;
+		search_expires = atomic_long_read(&search->expires);
+		if (time_before(search_expires, abs_earliest))
+			abs_earliest = search_expires;
+
+		if (pinfo->prefix_len != search->prefix_len)
+			continue;
+		if (!ipv6_addr_equal(&pinfo->prefix, &search->prefix))
+			continue;
+
+		pio = search;
+		/* continue loop to get expiry value */
+	}
+
+	if (!pio) {
+		struct inet6_dev *idev = __in6_dev_get(neigh->dev);
+		int max_addrs = idev->cnf.max_addresses;
+		int pio_count;
+
+		pio_count = atomic_inc_return(&idev->pio_count);
+		if (pio_count >= max_addrs) {
+			atomic_dec(&idev->pio_count);
+
+			pr_info_ratelimited("%s: too many PIOs (%d > %d), ignoring %pI6c: %pI6c/%d",
+					    neigh->dev->name, pio_count,
+					    max_addrs, naddr, &pinfo->prefix,
+					    pinfo->prefix_len);
+			return;
+		}
+		pr_debug("%s: %pI6c: new prefix %pI6c\n",
+			 neigh->dev->name, naddr, &pinfo->prefix);
+
+		pio = kzalloc(sizeof(*pio), GFP_ATOMIC);
+		INIT_LIST_HEAD(&pio->list);
+		pio->prefix = pinfo->prefix;
+		pio->prefix_len = pinfo->prefix_len;
+		atomic_long_set(&pio->expires, abs_expires);
+
+		write_lock_bh(&neigh->lock);
+		if (refcount_inc_not_zero(&neigh->refcnt))
+			list_add_tail_rcu(&pio->list, &neigh->pio_list);
+		write_unlock_bh(&neigh->lock);
+	} else {
+		atomic_long_set(&pio->expires, abs_expires);
+	}
+
+	mod_timer(&neigh->pio_timer, abs_earliest);
+}
+
+void addrconf_pio_timer(struct timer_list *t)
+{
+	struct neighbour *neigh = from_timer(neigh, t, pio_timer);
+	struct inet6_dev *idev = __in6_dev_get(neigh->dev);
+	struct ip6_neigh_pio *pio, *next;
+	bool have_next = false;
+	unsigned long next_expires, pio_expires;
+
+	write_lock(&neigh->lock);
+
+	list_for_each_entry_safe(pio, next, &neigh->pio_list, list) {
+		pio_expires = atomic_long_read(&pio->expires);
+		if (time_after(pio_expires, jiffies)) {
+			if (!have_next || time_before(pio_expires, next_expires)) {
+				have_next = true;
+				next_expires = pio_expires;
+			}
+			continue;
+		}
+
+		list_del_rcu(&pio->list);
+		atomic_dec(&idev->pio_count);
+		refcount_dec(&neigh->refcnt);
+		/* the neigh entry becomes GC'able when neigh->refcnt==1,
+		 * nothing further to do here explicitly
+		 */
+		kfree_rcu(pio, rcu);
+	}
+
+	if (have_next)
+		mod_timer(&neigh->pio_timer, next_expires);
+
+	write_unlock(&neigh->lock);
+}
+
+void addrconf_prefix_rcv(struct net_device *dev, struct neighbour *neigh,
+			 u8 *opt, int len, bool sllao)
 {
 	struct prefix_info *pinfo;
 	__u32 valid_lft;
@@ -2791,10 +2932,22 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 		rt_expires *= HZ;
 
 	/*
-	 *	Two things going on here:
-	 *	1) Add routes for on-link prefixes
-	 *	2) Configure prefixes with the auto flag set
+	 *	Three things going on here:
+	 *	1) Track prefixes per router, for source address selection
+	 *	2) Add routes for on-link prefixes
+	 *	3) Configure prefixes with the auto flag set
 	 */
+
+	/* This is intentionally before creating addresses to avoid a race
+	 * where the freshly created addresses are not associated with this
+	 * router yet.
+	 *
+	 * It is also intentionally not behind L/A bit and prefix length
+	 * checks to allow a router to indicate source address selection
+	 * preference for non-SLAAC (static, DHCPv6, whatever else) addresses.
+	 */
+	if (neigh)
+		addrconf_update_neigh_pio(neigh, pinfo, rt_expires);
 
 	if (pinfo->onlink) {
 		struct fib6_info *rt;
