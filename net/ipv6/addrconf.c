@@ -1474,6 +1474,7 @@ struct ipv6_saddr_score {
 
 struct ipv6_saddr_dst {
 	const struct in6_addr *addr;
+	const struct dst_entry *dst;
 	int ifindex;
 	int scope;
 	int label;
@@ -1747,9 +1748,12 @@ static int ipv6_get_saddr_master(struct net *net,
 	return hiscore_idx;
 }
 
-int ipv6_dev_get_saddr(struct net *net, const struct net_device *dst_dev,
-		       const struct in6_addr *daddr, unsigned int prefs,
-		       struct in6_addr *saddr)
+static int ipv6_common_get_saddr(struct net *net,
+				 const struct dst_entry *dst_entry,
+				 const struct net_device *dst_dev,
+				 const struct in6_addr *daddr,
+				 unsigned int prefs,
+				 struct in6_addr *saddr)
 {
 	struct ipv6_saddr_score scores[2], *hiscore;
 	struct ipv6_saddr_dst dst;
@@ -1762,6 +1766,7 @@ int ipv6_dev_get_saddr(struct net *net, const struct net_device *dst_dev,
 
 	dst_type = __ipv6_addr_type(daddr);
 	dst.addr = daddr;
+	dst.dst = dst_entry;
 	dst.ifindex = dst_dev ? dst_dev->ifindex : 0;
 	dst.scope = __ipv6_addr_src_scope(dst_type);
 	dst.label = ipv6_addr_label(net, daddr, dst_type, dst.ifindex);
@@ -1843,7 +1848,22 @@ out:
 	rcu_read_unlock();
 	return ret;
 }
+
+int ipv6_dev_get_saddr(struct net *net, const struct net_device *dst_dev,
+		       const struct in6_addr *daddr, unsigned int prefs,
+		       struct in6_addr *saddr)
+{
+	return ipv6_common_get_saddr(net, NULL, dst_dev, daddr, prefs, saddr);
+}
 EXPORT_SYMBOL(ipv6_dev_get_saddr);
+
+int ipv6_dst_get_saddr(struct net *net, const struct dst_entry *dst,
+		       const struct in6_addr *daddr, unsigned int prefs,
+		       struct in6_addr *saddr)
+{
+	return ipv6_common_get_saddr(net, dst, dst->dev, daddr, prefs, saddr);
+}
+EXPORT_SYMBOL(ipv6_dst_get_saddr);
 
 static int __ipv6_get_lladdr(struct inet6_dev *idev, struct in6_addr *addr,
 			      u32 banned_flags)
