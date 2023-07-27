@@ -49,6 +49,15 @@ struct prefix_info {
 	struct in6_addr		prefix;
 };
 
+struct ip6_neigh_pio {
+	struct list_head	list;
+
+	struct in6_addr		prefix;
+	u8			prefix_len;
+
+	unsigned long		expires;
+};
+
 #include <linux/ipv6.h>
 #include <linux/netdevice.h>
 #include <net/if_inet6.h>
@@ -271,7 +280,7 @@ static inline bool ipv6_is_mld(struct sk_buff *skb, int nexthdr, int offset)
 	return false;
 }
 
-void addrconf_prefix_rcv(struct net_device *dev,
+void addrconf_prefix_rcv(struct net_device *dev, struct neighbour *neigh,
 			 u8 *opt, int len, bool sllao);
 
 /*

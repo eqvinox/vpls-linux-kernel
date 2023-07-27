@@ -76,6 +76,7 @@ static bool ndisc_key_eq(const struct neighbour *neigh, const void *pkey);
 static bool ndisc_allow_add(const struct net_device *dev,
 			    struct netlink_ext_ack *extack);
 static int ndisc_constructor(struct neighbour *neigh);
+static void ndisc_destructor(struct neighbour *neigh);
 static void ndisc_solicit(struct neighbour *neigh, struct sk_buff *skb);
 static void ndisc_error_report(struct neighbour *neigh, struct sk_buff *skb);
 static int pndisc_constructor(struct pneigh_entry *n);
@@ -113,6 +114,7 @@ struct neigh_table nd_tbl = {
 	.hash =		ndisc_hash,
 	.key_eq =	ndisc_key_eq,
 	.constructor =	ndisc_constructor,
+	.destructor =	ndisc_destructor,
 	.pconstructor =	pndisc_constructor,
 	.pdestructor =	pndisc_destructor,
 	.proxy_redo =	pndisc_redo,
@@ -369,6 +371,14 @@ static int ndisc_constructor(struct neighbour *neigh)
 	}
 	in6_dev_put(in6_dev);
 	return 0;
+}
+
+static void ndisc_destructor(struct neighbour *neigh)
+{
+	struct ip6_neigh_pio *pio, *tmp;
+
+	list_for_each_entry_safe(pio, tmp, &neigh->pio_list, list)
+		kfree(pio);
 }
 
 static int pndisc_constructor(struct pneigh_entry *n)
@@ -1557,7 +1567,7 @@ skip_routeinfo:
 		for (p = ndopts.nd_opts_pi;
 		     p;
 		     p = ndisc_next_option(p, ndopts.nd_opts_pi_end)) {
-			addrconf_prefix_rcv(skb->dev, (u8 *)p,
+			addrconf_prefix_rcv(skb->dev, neigh, (u8 *)p,
 					    (p->nd_opt_len) << 3,
 					    ndopts.nd_opts_src_lladdr != NULL);
 		}

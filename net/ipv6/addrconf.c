@@ -1453,6 +1453,7 @@ enum {
 	IPV6_SADDR_RULE_HOA,
 #endif
 	IPV6_SADDR_RULE_OIF,
+	IPV6_SADDR_RULE_PIO_BY_NEXTHOP,
 	IPV6_SADDR_RULE_LABEL,
 	IPV6_SADDR_RULE_PRIVACY,
 	IPV6_SADDR_RULE_ORCHID,
@@ -1518,6 +1519,36 @@ static bool ipv6_allow_optimistic_dad(struct net *net,
 #else
 	return false;
 #endif
+}
+
+static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
+			      struct ipv6_saddr_dst *dst)
+{
+	const struct rt6_info *rt;
+	struct neighbour *n;
+	int ret = 0;
+
+	rt = container_of(dst->dst, struct rt6_info, dst);
+	rcu_read_lock();
+	n = __ipv6_neigh_lookup_noref(rt->dst.dev, rt6_nexthop(rt, dst->addr));
+	if (n) {
+		struct ip6_neigh_pio *pio;
+
+		list_for_each_entry(pio, &n->pio_list, list) {
+			if (ipv6_prefix_equal(&score->ifa->addr, &pio->prefix,
+					      pio->prefix_len)) {
+				pr_info("src %pI6 found on %pI6\n",
+					&score->ifa->addr, n->primary_key);
+				ret = 1;
+				break;
+			}
+		}
+		if (ret == 0)
+			pr_info("src %pI6 not found on %pI6\n",
+				&score->ifa->addr, n->primary_key);
+	}
+	rcu_read_unlock();
+	return ret;
 }
 
 static int ipv6_get_saddr_eval(struct net *net,
@@ -1603,6 +1634,13 @@ static int ipv6_get_saddr_eval(struct net *net,
 		/* Rule 5: Prefer outgoing interface */
 		ret = (!dst->ifindex ||
 		       dst->ifindex == score->ifa->idev->dev->ifindex);
+		break;
+	case IPV6_SADDR_RULE_PIO_BY_NEXTHOP:
+		/* Rule 5.5: Prefer sources advertised by chosen next-hop */
+		if (dst->dst && !dst->dst->error)
+			ret = ipv6_saddr_rule5p5(score, dst);
+		else
+			ret = 1;
 		break;
 	case IPV6_SADDR_RULE_LABEL:
 		/* Rule 6: Prefer matching label */
@@ -2705,7 +2743,42 @@ int addrconf_prefix_rcv_add_addr(struct net *net, struct net_device *dev,
 }
 EXPORT_SYMBOL_GPL(addrconf_prefix_rcv_add_addr);
 
-void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
+static void addrconf_update_neigh_pio(struct neighbour *neigh,
+				      struct prefix_info *pinfo,
+				      unsigned long expires)
+{
+	struct ip6_neigh_pio *pio = NULL, *search;
+	unsigned total = 0;
+
+	list_for_each_entry(search, &neigh->pio_list, list) {
+		total++;
+		if (pinfo->prefix_len != search->prefix_len)
+			continue;
+		if (!ipv6_addr_equal(&pinfo->prefix, &search->prefix))
+			continue;
+		pio = search;
+		break;
+	}
+
+	if (!pio) {
+		pr_info("%s: pio_list: new prefix %pI6\n",
+			neigh->dev->name, &pinfo->prefix);
+		if (total >= 16)
+			return;
+
+		pio = kcalloc(1, sizeof(*pio), GFP_KERNEL);
+		INIT_LIST_HEAD(&pio->list);
+		pio->prefix = pinfo->prefix;
+		pio->prefix_len = pinfo->prefix_len;
+		list_add_tail(&pio->list, &neigh->pio_list);
+	}
+
+	pio->expires = jiffies + expires;
+	/* set some timer to clean this */
+}
+
+void addrconf_prefix_rcv(struct net_device *dev, struct neighbour *neigh,
+			 u8 *opt, int len, bool sllao)
 {
 	struct prefix_info *pinfo;
 	__u32 valid_lft;
@@ -2714,6 +2787,7 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 	u32 addr_flags = 0;
 	struct inet6_dev *in6_dev;
 	struct net *net = dev_net(dev);
+	unsigned long rt_expires;
 
 	pinfo = (struct prefix_info *) opt;
 
@@ -2747,6 +2821,19 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 		return;
 	}
 
+	/* Avoid arithmetic overflow. Really, we could
+	 * save rt_expires in seconds, likely valid_lft,
+	 * but it would require division in fib gc, that it
+	 * not good.
+	 */
+	if (HZ > USER_HZ)
+		rt_expires = addrconf_timeout_fixup(valid_lft, HZ);
+	else
+		rt_expires = addrconf_timeout_fixup(valid_lft, USER_HZ);
+
+	if (addrconf_finite_timeout(rt_expires))
+		rt_expires *= HZ;
+
 	/*
 	 *	Two things going on here:
 	 *	1) Add routes for on-link prefixes
@@ -2755,20 +2842,6 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 
 	if (pinfo->onlink) {
 		struct fib6_info *rt;
-		unsigned long rt_expires;
-
-		/* Avoid arithmetic overflow. Really, we could
-		 * save rt_expires in seconds, likely valid_lft,
-		 * but it would require division in fib gc, that it
-		 * not good.
-		 */
-		if (HZ > USER_HZ)
-			rt_expires = addrconf_timeout_fixup(valid_lft, HZ);
-		else
-			rt_expires = addrconf_timeout_fixup(valid_lft, USER_HZ);
-
-		if (addrconf_finite_timeout(rt_expires))
-			rt_expires *= HZ;
 
 		rt = addrconf_get_prefix_route(&pinfo->prefix,
 					       pinfo->prefix_len,
@@ -2835,6 +2908,8 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 		goto put;
 
 ok:
+		addrconf_update_neigh_pio(neigh, pinfo, rt_expires);
+
 		err = addrconf_prefix_rcv_add_addr(net, dev, pinfo, in6_dev,
 						   &addr, addr_type,
 						   addr_flags, sllao,

@@ -504,6 +504,7 @@ do_alloc:
 	n->dead		  = 1;
 	INIT_LIST_HEAD(&n->gc_list);
 	INIT_LIST_HEAD(&n->managed_list);
+	INIT_LIST_HEAD(&n->pio_list);
 
 	atomic_inc(&tbl->entries);
 out:

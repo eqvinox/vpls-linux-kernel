@@ -159,6 +159,7 @@ struct neighbour {
 	const struct neigh_ops	*ops;
 	struct list_head	gc_list;
 	struct list_head	managed_list;
+	struct list_head	pio_list;
 	struct rcu_head		rcu;
 	struct net_device	*dev;
 	netdevice_tracker	dev_tracker;
