@@ -1526,7 +1526,9 @@ struct ipv6_saddr_score {
 };
 
 struct ipv6_saddr_dst {
-	const struct in6_addr *addr;
+	const struct flowi6 *fl6;
+	const struct dst_entry *dst;
+	const struct sock *sk;
 	int ifindex;
 	int scope;
 	int label;
@@ -1603,7 +1605,7 @@ static int ipv6_get_saddr_eval(struct net *net,
 		break;
 	case IPV6_SADDR_RULE_LOCAL:
 		/* Rule 1: Prefer same address */
-		ret = ipv6_addr_equal(&score->ifa->addr, dst->addr);
+		ret = ipv6_addr_equal(&score->ifa->addr, &dst->fl6->daddr);
 		break;
 	case IPV6_SADDR_RULE_SCOPE:
 		/* Rule 2: Prefer appropriate scope
@@ -1681,11 +1683,11 @@ static int ipv6_get_saddr_eval(struct net *net,
 		 *	    non-ORCHID vs non-ORCHID
 		 */
 		ret = !(ipv6_addr_orchid(&score->ifa->addr) ^
-			ipv6_addr_orchid(dst->addr));
+			ipv6_addr_orchid(&dst->fl6->daddr));
 		break;
 	case IPV6_SADDR_RULE_PREFIX:
 		/* Rule 8: Use longest matching prefix */
-		ret = ipv6_addr_diff(&score->ifa->addr, dst->addr);
+		ret = ipv6_addr_diff(&score->ifa->addr, &dst->fl6->daddr);
 		if (ret > score->ifa->prefix_len)
 			ret = score->ifa->prefix_len;
 		score->matchlen = ret;
@@ -1803,9 +1805,12 @@ static int ipv6_get_saddr_master(struct net *net,
 	return hiscore_idx;
 }
 
-int ipv6_dev_get_saddr(struct net *net, const struct net_device *dst_dev,
-		       const struct in6_addr *daddr, unsigned int prefs,
-		       struct in6_addr *saddr)
+static int ipv6_common_get_saddr(struct net *net,
+				 const struct dst_entry *dst_entry,
+				 const struct net_device *dst_dev,
+				 const struct sock *sk,
+				 unsigned int prefs,
+				 struct flowi6 *fl6)
 {
 	struct ipv6_saddr_score scores[2], *hiscore;
 	struct ipv6_saddr_dst dst;
@@ -1816,11 +1821,13 @@ int ipv6_dev_get_saddr(struct net *net, const struct net_device *dst_dev,
 	int hiscore_idx = 0;
 	int ret = 0;
 
-	dst_type = __ipv6_addr_type(daddr);
-	dst.addr = daddr;
+	dst_type = __ipv6_addr_type(&fl6->daddr);
+	dst.fl6 = fl6;
+	dst.sk = sk;
+	dst.dst = dst_entry;
 	dst.ifindex = dst_dev ? dst_dev->ifindex : 0;
 	dst.scope = __ipv6_addr_src_scope(dst_type);
-	dst.label = ipv6_addr_label(net, daddr, dst_type, dst.ifindex);
+	dst.label = ipv6_addr_label(net, &fl6->daddr, dst_type, dst.ifindex);
 	dst.prefs = prefs;
 
 	scores[hiscore_idx].rule = -1;
@@ -1894,12 +1901,37 @@ out:
 	if (!hiscore->ifa)
 		ret = -EADDRNOTAVAIL;
 	else
-		*saddr = hiscore->ifa->addr;
+		fl6->saddr = hiscore->ifa->addr;
 
 	rcu_read_unlock();
 	return ret;
 }
+
+int ipv6_dev_get_saddr(struct net *net, const struct net_device *dst_dev,
+		       const struct in6_addr *daddr, unsigned int prefs,
+		       struct in6_addr *saddr)
+{
+	struct flowi6 fl6;
+	int ret;
+
+	memset(&fl6, 0, sizeof(fl6));
+	fl6.daddr = *daddr;
+
+	ret = ipv6_common_get_saddr(net, NULL, dst_dev, NULL, prefs, &fl6);
+	if (!ret)
+		*saddr = fl6.saddr;
+
+	return ret;
+}
 EXPORT_SYMBOL(ipv6_dev_get_saddr);
+
+int ipv6_fl_get_saddr(struct net *net, const struct dst_entry *dst,
+		      const struct sock *sk, unsigned int prefs,
+		      struct flowi6 *fl6)
+{
+	return ipv6_common_get_saddr(net, dst, dst->dev, sk, prefs, fl6);
+}
+EXPORT_SYMBOL(ipv6_fl_get_saddr);
 
 static int __ipv6_get_lladdr(struct inet6_dev *idev, struct in6_addr *addr,
 			      u32 banned_flags)
