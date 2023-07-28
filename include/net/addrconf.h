@@ -50,6 +50,11 @@ struct prefix_info {
 };
 
 struct ip6_neigh_pio {
+	/* this obviously needs locking or RCU.
+	 * i just didn't care for a proof of concept ¯\_(ツ)_/¯
+	 *
+	 * also the expiry is completely unhandled
+	 */
 	struct list_head	list;
 
 	struct in6_addr		prefix;
