@@ -2551,6 +2551,8 @@ out:
 	return skb->len;
 }
 
+#include <net/addrconf.h>
+
 static int neigh_fill_info(struct sk_buff *skb, struct neighbour *neigh,
 			   u32 pid, u32 seq, int type, unsigned int flags)
 {
@@ -2559,6 +2561,8 @@ static int neigh_fill_info(struct sk_buff *skb, struct neighbour *neigh,
 	struct nda_cacheinfo ci;
 	struct nlmsghdr *nlh;
 	struct ndmsg *ndm;
+	struct ip6_neigh_pio *pio;
+	struct nlattr *nest;
 
 	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*ndm), flags);
 	if (nlh == NULL)
@@ -2605,9 +2609,23 @@ static int neigh_fill_info(struct sk_buff *skb, struct neighbour *neigh,
 	if (neigh_flags_ext && nla_put_u32(skb, NDA_FLAGS_EXT, neigh_flags_ext))
 		goto nla_put_failure;
 
+	list_for_each_entry(pio, &neigh->pio_list, list) {
+		nest = nla_nest_start(skb, NDA_PIO_PREFIX);
+		if (nest == NULL)
+			goto nla_put_failure;
+
+		if (nla_put_in6_addr(skb, 1, &pio->prefix) ||
+		    nla_put_u8(skb, 2, pio->prefix_len))
+			goto nla_put_failure_nest;
+
+		nla_nest_end(skb, nest);
+	}
+
 	nlmsg_end(skb, nlh);
 	return 0;
 
+nla_put_failure_nest:
+	nla_nest_cancel(skb, nest);
 nla_put_failure:
 	nlmsg_cancel(skb, nlh);
 	return -EMSGSIZE;
