@@ -142,6 +142,8 @@ int addrconf_prefix_rcv_add_addr(struct net *net, struct net_device *dev,
 				 u32 addr_flags, bool sllao, bool tokenized,
 				 __u32 valid_lft, u32 prefered_lft);
 void addrconf_pio_timer(struct timer_list *t);
+int addrconf_fill_info(struct sk_buff *skb, struct neighbour *neigh);
+size_t addrconf_nlmsg_size(struct neighbour *neigh);
 
 static inline void addrconf_addr_eui48_base(u8 *eui, const char *const addr)
 {

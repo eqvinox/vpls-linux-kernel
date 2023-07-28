@@ -2860,6 +2860,58 @@ void addrconf_pio_timer(struct timer_list *t)
 	write_unlock(&neigh->lock);
 }
 
+size_t addrconf_nlmsg_size(struct neighbour *neigh)
+{
+	return nla_total_size(0) +	/* NDA_PIO_PREFIX nest */
+		IPV6_MAX_PIO_PER_NEIGH * (
+			nla_total_size(0) +			/* list item nest */
+			nla_total_size(sizeof(struct in6_addr)) + /* NDAPIO_PREFIX */
+			nla_total_size(sizeof(u8)) +		/* NDAPIO_PREFIXLEN */
+			nla_total_size_64bit(sizeof(u64))	/* NDAPIO_EXPIRY */
+		);
+}
+
+int addrconf_fill_info(struct sk_buff *skb, struct neighbour *neigh)
+{
+	struct ip6_neigh_pio *pio;
+	unsigned prefix_idx = 0;
+	struct nlattr *nest_all = NULL, *nest_item;
+
+	list_for_each_entry(pio, &neigh->pio_list, list) {
+		unsigned long pio_expires;
+
+		if (!nest_all) {
+			nest_all = nla_nest_start(skb, NDA_PIO_PREFIX);
+			if (nest_all == NULL)
+				goto nla_put_failure;
+		}
+
+		nest_item = nla_nest_start(skb, ++prefix_idx);
+		if (nest_item == NULL)
+			goto nla_put_failure_nest_all;
+
+		pio_expires = atomic_long_read(&pio->expires);
+		if (nla_put_in6_addr(skb, NDAPIO_PREFIX, &pio->prefix) ||
+		    nla_put_u8(skb, NDAPIO_PREFIXLEN, pio->prefix_len) ||
+		    nla_put_msecs(skb, NDAPIO_EXPIRY, pio_expires - jiffies,
+				  NDAPIO_PAD))
+			goto nla_put_failure_nest_item;
+
+		nla_nest_end(skb, nest_item);
+	}
+
+	if (nest_all)
+		nla_nest_end(skb, nest_all);
+	return 0;
+
+nla_put_failure_nest_item:
+	nla_nest_cancel(skb, nest_item);
+nla_put_failure_nest_all:
+	nla_nest_cancel(skb, nest_all);
+nla_put_failure:
+	return -EMSGSIZE;
+}
+
 void addrconf_prefix_rcv(struct net_device *dev, struct neighbour *neigh,
 			 u8 *opt, int len, bool sllao)
 {
