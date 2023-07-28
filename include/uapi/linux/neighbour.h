@@ -34,6 +34,7 @@ enum {
 	NDA_FLAGS_EXT,
 	NDA_NDM_STATE_MASK,
 	NDA_NDM_FLAGS_MASK,
+	NDA_PIO_PREFIX,
 	__NDA_MAX
 };
 
@@ -100,6 +101,19 @@ struct nda_cacheinfo {
 	__u32		ndm_updated;
 	__u32		ndm_refcnt;
 };
+
+/* NDA_PIO_PREFIX contains a list, which contains groups of these attrs: */
+
+enum {
+	NDAPIO_UNSPEC,
+	NDAPIO_PAD,
+	NDAPIO_PREFIX,
+	NDAPIO_PREFIXLEN,
+	NDAPIO_EXPIRY,
+	__NDAPIO_MAX
+};
+
+#define NDAPIO_MAX (__NDAPIO_MAX - 1)
 
 /*****************************************************************
  *		Neighbour tables specific messages.

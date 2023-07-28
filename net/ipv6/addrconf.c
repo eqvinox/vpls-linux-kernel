@@ -1546,31 +1546,28 @@ static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
 	const struct rt6_info *rt;
 	struct neighbour *n;
 	int ret = 0;
+	struct ip6_neigh_pio *pio;
 
 	rt = container_of(dst->dst, struct rt6_info, dst);
 	rcu_read_lock();
 	n = __ipv6_neigh_lookup_noref(rt->dst.dev, rt6_nexthop(rt, dst->addr));
-	if (n) {
-		struct ip6_neigh_pio *pio;
+	if (!n)
+		goto out;
 
-		list_for_each_entry_rcu(pio, &n->pio_list, list) {
-			unsigned long pio_expires;
+	list_for_each_entry_rcu(pio, &n->pio_list, list) {
+		unsigned long pio_expires;
 
-			pio_expires = atomic_long_read(&pio->expires);
-			if (time_before(pio_expires, jiffies))
-				continue;
-			if (ipv6_prefix_equal(&score->ifa->addr, &pio->prefix,
-					      pio->prefix_len)) {
-				pr_info("src %pI6 found on %pI6\n",
-					&score->ifa->addr, n->primary_key);
-				ret = 1;
-				break;
-			}
+		pio_expires = atomic_long_read(&pio->expires);
+		if (time_before(pio_expires, jiffies))
+			continue;
+		if (ipv6_prefix_equal(&score->ifa->addr, &pio->prefix,
+				      pio->prefix_len)) {
+			ret = 1;
+			break;
 		}
-		if (ret == 0)
-			pr_info("src %pI6 not found on %pI6\n",
-				&score->ifa->addr, n->primary_key);
 	}
+
+out:
 	rcu_read_unlock();
 	return ret;
 }
@@ -2816,8 +2813,6 @@ static void addrconf_update_neigh_pio(struct neighbour *neigh,
 					    pinfo->prefix_len);
 			return;
 		}
-		pr_debug("%s: %pI6c: new prefix %pI6c\n",
-			 neigh->dev->name, naddr, &pinfo->prefix);
 
 		pio = kzalloc(sizeof(*pio), GFP_ATOMIC);
 		INIT_LIST_HEAD(&pio->list);
@@ -2842,6 +2837,7 @@ void addrconf_pio_timer(struct timer_list *t)
 	struct inet6_dev *idev = __in6_dev_get(neigh->dev);
 	struct ip6_neigh_pio *pio, *next;
 	bool have_next = false;
+	bool notify = false;
 	unsigned long next_expires, pio_expires;
 
 	write_lock(&neigh->lock);
@@ -2863,12 +2859,75 @@ void addrconf_pio_timer(struct timer_list *t)
 		 * nothing further to do here explicitly
 		 */
 		kfree_rcu(pio, rcu);
+		notify = true;
 	}
 
 	if (have_next)
 		mod_timer(&neigh->pio_timer, next_expires);
 
 	write_unlock(&neigh->lock);
+
+	if (notify)
+		neigh_update_notify(neigh, 0);
+}
+
+size_t addrconf_nlmsg_size(struct neighbour *neigh)
+{
+	struct inet6_dev *idev = __in6_dev_get(neigh->dev);
+
+	return nla_total_size(0) +	/* NDA_PIO_PREFIX nest */
+		idev->cnf.max_addresses * (
+			nla_total_size(0) +			/* list item nest */
+			nla_total_size(sizeof(struct in6_addr)) + /* NDAPIO_PREFIX */
+			nla_total_size(sizeof(u8)) +		/* NDAPIO_PREFIXLEN */
+			nla_total_size_64bit(sizeof(u64))	/* NDAPIO_EXPIRY */
+		);
+}
+
+int addrconf_fill_info(struct sk_buff *skb, struct neighbour *neigh)
+{
+	struct ip6_neigh_pio *pio;
+	unsigned int prefix_idx = 0;
+	struct nlattr *nest_all = NULL, *nest_item;
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(pio, &neigh->pio_list, list) {
+		unsigned long pio_expires;
+
+		if (!nest_all) {
+			nest_all = nla_nest_start(skb, NDA_PIO_PREFIX);
+			if (!nest_all)
+				goto nla_put_failure;
+		}
+
+		nest_item = nla_nest_start(skb, ++prefix_idx);
+		if (!nest_item)
+			goto nla_put_failure_nest_all;
+
+		pio_expires = atomic_long_read(&pio->expires);
+		if (nla_put_in6_addr(skb, NDAPIO_PREFIX, &pio->prefix) ||
+		    nla_put_u8(skb, NDAPIO_PREFIXLEN, pio->prefix_len) ||
+		    nla_put_msecs(skb, NDAPIO_EXPIRY, pio_expires - jiffies,
+				  NDAPIO_PAD))
+			goto nla_put_failure_nest_item;
+
+		nla_nest_end(skb, nest_item);
+	}
+
+	rcu_read_unlock();
+
+	if (nest_all)
+		nla_nest_end(skb, nest_all);
+	return 0;
+
+nla_put_failure_nest_item:
+	nla_nest_cancel(skb, nest_item);
+nla_put_failure_nest_all:
+	nla_nest_cancel(skb, nest_all);
+nla_put_failure:
+	rcu_read_unlock();
+	return -EMSGSIZE;
 }
 
 void addrconf_prefix_rcv(struct net_device *dev, struct neighbour *neigh,
