@@ -210,6 +210,8 @@ struct neigh_table {
 	bool			(*key_eq)(const struct neighbour *, const void *pkey);
 	int			(*constructor)(struct neighbour *);
 	void			(*destructor)(struct neighbour *);
+	int			(*fill_info)(struct sk_buff *, struct neighbour *);
+	size_t			(*nlmsg_size)(struct neighbour *);
 	int			(*pconstructor)(struct pneigh_entry *);
 	void			(*pdestructor)(struct pneigh_entry *);
 	void			(*proxy_redo)(struct sk_buff *skb);
@@ -352,6 +354,7 @@ int __neigh_event_send(struct neighbour *neigh, struct sk_buff *skb,
 		       const bool immediate_ok);
 int neigh_update(struct neighbour *neigh, const u8 *lladdr, u8 new, u32 flags,
 		 u32 nlmsg_pid);
+void neigh_update_notify(struct neighbour *neigh, u32 nlmsg_pid);
 void __neigh_set_probe_once(struct neighbour *neigh);
 bool neigh_remove_one(struct neighbour *ndel, struct neigh_table *tbl);
 void neigh_changeaddr(struct neigh_table *tbl, struct net_device *dev);
