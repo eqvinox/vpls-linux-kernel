@@ -2609,6 +2609,9 @@ static int neigh_fill_info(struct sk_buff *skb, struct neighbour *neigh,
 	if (neigh_flags_ext && nla_put_u32(skb, NDA_FLAGS_EXT, neigh_flags_ext))
 		goto nla_put_failure;
 
+	if (neigh->tbl->fill_info && neigh->tbl->fill_info(skb, neigh))
+		goto nla_put_failure;
+
 	nlmsg_end(skb, nlh);
 	return 0;
 
@@ -2956,7 +2959,7 @@ static int neigh_valid_get_req(const struct nlmsghdr *nlh,
 	return 0;
 }
 
-static inline size_t neigh_nlmsg_size(void)
+static inline size_t neigh_nlmsg_size(struct neighbour *neigh)
 {
 	return NLMSG_ALIGN(sizeof(struct ndmsg))
 	       + nla_total_size(MAX_ADDR_LEN) /* NDA_DST */
@@ -2964,7 +2967,8 @@ static inline size_t neigh_nlmsg_size(void)
 	       + nla_total_size(sizeof(struct nda_cacheinfo))
 	       + nla_total_size(4)  /* NDA_PROBES */
 	       + nla_total_size(4)  /* NDA_FLAGS_EXT */
-	       + nla_total_size(1); /* NDA_PROTOCOL */
+	       + nla_total_size(1)  /* NDA_PROTOCOL */
+	       + (neigh->tbl->nlmsg_size ? neigh->tbl->nlmsg_size(neigh) : 0);
 }
 
 static int neigh_get_reply(struct net *net, struct neighbour *neigh,
@@ -2973,7 +2977,7 @@ static int neigh_get_reply(struct net *net, struct neighbour *neigh,
 	struct sk_buff *skb;
 	int err = 0;
 
-	skb = nlmsg_new(neigh_nlmsg_size(), GFP_KERNEL);
+	skb = nlmsg_new(neigh_nlmsg_size(neigh), GFP_KERNEL);
 	if (!skb)
 		return -ENOBUFS;
 
@@ -3507,7 +3511,7 @@ static void __neigh_notify(struct neighbour *n, int type, int flags,
 	struct sk_buff *skb;
 	int err = -ENOBUFS;
 
-	skb = nlmsg_new(neigh_nlmsg_size(), GFP_ATOMIC);
+	skb = nlmsg_new(neigh_nlmsg_size(n), GFP_ATOMIC);
 	if (skb == NULL)
 		goto errout;
 

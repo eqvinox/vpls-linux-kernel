@@ -208,6 +208,8 @@ struct neigh_table {
 	bool			(*key_eq)(const struct neighbour *, const void *pkey);
 	int			(*constructor)(struct neighbour *);
 	void			(*destructor)(struct neighbour *);
+	int			(*fill_info)(struct sk_buff *, struct neighbour *);
+	size_t			(*nlmsg_size)(struct neighbour *);
 	int			(*pconstructor)(struct pneigh_entry *);
 	void			(*pdestructor)(struct pneigh_entry *);
 	void			(*proxy_redo)(struct sk_buff *skb);
