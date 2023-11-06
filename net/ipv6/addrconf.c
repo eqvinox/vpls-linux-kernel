@@ -2740,6 +2740,7 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 	u32 addr_flags = 0;
 	struct inet6_dev *in6_dev;
 	struct net *net = dev_net(dev);
+	unsigned long rt_expires;
 
 	pinfo = (struct prefix_info *) opt;
 
@@ -2776,6 +2777,19 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 	if (valid_lft != 0 && valid_lft < in6_dev->cnf.accept_ra_min_lft)
 		goto put;
 
+	/* Avoid arithmetic overflow. Really, we could
+	 * save rt_expires in seconds, likely valid_lft,
+	 * but it would require division in fib gc, that it
+	 * not good.
+	 */
+	if (HZ > USER_HZ)
+		rt_expires = addrconf_timeout_fixup(valid_lft, HZ);
+	else
+		rt_expires = addrconf_timeout_fixup(valid_lft, USER_HZ);
+
+	if (addrconf_finite_timeout(rt_expires))
+		rt_expires *= HZ;
+
 	/*
 	 *	Two things going on here:
 	 *	1) Add routes for on-link prefixes
@@ -2784,20 +2798,6 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len, bool sllao)
 
 	if (pinfo->onlink) {
 		struct fib6_info *rt;
-		unsigned long rt_expires;
-
-		/* Avoid arithmetic overflow. Really, we could
-		 * save rt_expires in seconds, likely valid_lft,
-		 * but it would require division in fib gc, that it
-		 * not good.
-		 */
-		if (HZ > USER_HZ)
-			rt_expires = addrconf_timeout_fixup(valid_lft, HZ);
-		else
-			rt_expires = addrconf_timeout_fixup(valid_lft, USER_HZ);
-
-		if (addrconf_finite_timeout(rt_expires))
-			rt_expires *= HZ;
 
 		rt = addrconf_get_prefix_route(&pinfo->prefix,
 					       pinfo->prefix_len,
