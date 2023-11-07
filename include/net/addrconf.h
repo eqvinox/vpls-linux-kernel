@@ -55,6 +55,7 @@ struct prefix_info {
  * - move IPV6_MAX_PIO_PER_NEIGH into a better place and/or make it a sysctl
  * - decide whether this should be writable from userspace via netlink
  *   (it currently is not)
+ * - send RTM_NEWNEIGH when PIO state changes
  */
 struct ip6_neigh_pio {
 	struct list_head	list;
