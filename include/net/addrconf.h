@@ -49,6 +49,12 @@ struct prefix_info {
 	struct in6_addr		prefix;
 };
 
+/*
+ * TODO items left for the PIO/rule 5.5 code:
+ *
+ * - decide whether this should be writable from userspace via netlink
+ *   (it currently is not)
+ */
 struct ip6_neigh_pio {
 	struct list_head	list;
 	struct rcu_head		rcu;
