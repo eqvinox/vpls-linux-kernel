@@ -1506,6 +1506,7 @@ enum {
 	IPV6_SADDR_RULE_HOA,
 #endif
 	IPV6_SADDR_RULE_OIF,
+	IPV6_SADDR_RULE_PIO_BY_NEXTHOP,
 	IPV6_SADDR_RULE_LABEL,
 	IPV6_SADDR_RULE_PRIVACY,
 	IPV6_SADDR_RULE_ORCHID,
@@ -1526,13 +1527,14 @@ struct ipv6_saddr_score {
 };
 
 struct ipv6_saddr_dst {
-	const struct flowi6 *fl6;
+	struct flowi6 *fl6;
 	const struct dst_entry *dst;
 	const struct sock *sk;
 	int ifindex;
 	int scope;
 	int label;
 	unsigned int prefs;
+	struct net *net;
 };
 
 static inline int ipv6_saddr_preferred(int type)
@@ -1577,11 +1579,66 @@ static bool ipv6_allow_optimistic_dad(const struct net *net,
 #endif
 }
 
+static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
+			      struct ipv6_saddr_dst *saddr_dst)
+{
+	const struct rt6_info *rt, *cmp_rt;
+	struct dst_entry *cmp_dst;
+	int ret = 0;
+
+	/* fl6->saddr is ::, cf. check at the top of ipv6_common_get_saddr() */
+	saddr_dst->fl6->saddr = score->ifa->addr;
+	cmp_dst = ip6_route_output(saddr_dst->net, saddr_dst->sk,
+				   saddr_dst->fl6);
+	memset(&saddr_dst->fl6->saddr, 0, sizeof(saddr_dst->fl6->saddr));
+
+	if (cmp_dst->error)
+		goto out_release_dst;
+	if (cmp_dst == saddr_dst->dst) {
+		ret = 1;
+		goto out_release_dst;
+	}
+
+	if (saddr_dst->dst->dev != cmp_dst->dev)
+		goto out_release_dst;
+
+	rt = container_of(saddr_dst->dst, struct rt6_info, dst);
+	cmp_rt = container_of(cmp_dst, struct rt6_info, dst);
+
+	if (ipv6_addr_equal(&rt->rt6i_gateway, &cmp_rt->rt6i_gateway)) {
+		netdev_info(saddr_dst->dst->dev, "%pI6 -> %pI6 gateway match",
+			    &score->ifa->addr, &saddr_dst->fl6->daddr);
+		ret = 1;
+	} else {
+		netdev_info(saddr_dst->dst->dev, "%pI6 -> %pI6 gateway no match (%pI6, %pI6)",
+			    &score->ifa->addr, &saddr_dst->fl6->daddr,
+			    &rt->rt6i_gateway, &cmp_rt->rt6i_gateway);
+	}
+
+out_release_dst:
+	dst_release(cmp_dst);
+	return ret;
+}
+
 static int ipv6_get_saddr_eval(struct net *net,
 			       struct ipv6_saddr_score *score,
 			       struct ipv6_saddr_dst *dst,
 			       int i)
 {
+#ifdef CONFIG_IPV6_SUBTREES
+	/* Without subtrees, the source address will make no difference in the
+	 * ip6_route_output call in rule5p5.  Therefore the rule 5.5 check
+	 * becomes useless.  This wouldn't result in any errors, but
+	 * ip6_route_output isn't free, so if subtrees are disabled save some
+	 * cycles by skipping this entirely.
+	 *
+	 * This is done through subtrees_enabled to have the code compiled
+	 * regardless.
+	 */
+	static const int subtrees_enabled = 1;
+#else
+	static const int subtrees_enabled = 0;
+#endif
 	int ret;
 
 	if (i <= score->rule) {
@@ -1660,6 +1717,13 @@ static int ipv6_get_saddr_eval(struct net *net,
 		/* Rule 5: Prefer outgoing interface */
 		ret = (!dst->ifindex ||
 		       dst->ifindex == score->ifa->idev->dev->ifindex);
+		break;
+	case IPV6_SADDR_RULE_PIO_BY_NEXTHOP:
+		/* Rule 5.5: Prefer sources advertised by chosen next-hop */
+		if (subtrees_enabled && dst->dst && !dst->dst->error)
+			ret = ipv6_saddr_rule5p5(score, dst);
+		else
+			ret = 1;
 		break;
 	case IPV6_SADDR_RULE_LABEL:
 		/* Rule 6: Prefer matching label */
@@ -1821,7 +1885,12 @@ static int ipv6_common_get_saddr(struct net *net,
 	int hiscore_idx = 0;
 	int ret = 0;
 
+	/* we should never end up here with a non-empty saddr. */
+	if (WARN_ON_ONCE(!ipv6_addr_any(&fl6->saddr)))
+		return 0;
+
 	dst_type = __ipv6_addr_type(&fl6->daddr);
+	dst.net = net;
 	dst.fl6 = fl6;
 	dst.sk = sk;
 	dst.dst = dst_entry;
