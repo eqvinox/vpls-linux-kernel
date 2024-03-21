@@ -1,18 +1,23 @@
-Linux kernel
-============
+Linux kernel RFC6724 rule 5.5, source address selection half
+============================================================
 
-There are several guides for kernel developers and users. These guides can
-be rendered in a number of formats, like HTML and PDF. Please read
-Documentation/admin-guide/README.rst first.
+How this works, when you need to pick a source address, is:
 
-In order to build the documentation, use ``make htmldocs`` or
-``make pdfdocs``.  The formatted documentation can also be read online at:
+1. you do a routing lookup for your destination with :: as the source address.
+1a. if the route you found has a "prefsrc", you're done.
+2. jump into the source address selection and run the other rules
+3. every address that is left when you arrive at 5.5:
+3a. do another routing lookup for your destination, but with the source set.
+    Crucially, this step will hit a source-specific route, if one exists.
+3b. if nexthop you found is the same as the one in 1., that source address
+    is preferred over ones that don't match on nexthop.
+4. apply the other 6724 rules
 
-    https://www.kernel.org/doc/html/latest/
+This patchset does NOT install source-specific routes.  There will be more
+patching to make the kernel do this for RAs it receives, but you can just set
+them manually, e.g.
 
-There are various text files in the Documentation/ subdirectory,
-several of them using the ReStructured Text markup notation.
+`ip -6 route add ::/0 from 2001:db8::/64 via fe80::3456 dev eth0`
 
-Please read the Documentation/process/changes.rst file, as it contains the
-requirements for building and running the kernel, and information about
-the problems which may result by upgrading your kernel.
+Note you either need unqualified routes (`from ::/0`) or special
+source-selection routes (`from ::/128`) for step 1 to work.
