@@ -1606,13 +1606,56 @@ static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
 	cmp_rt = container_of(cmp_dst, struct rt6_info, dst);
 
 	if (ipv6_addr_equal(&rt->rt6i_gateway, &cmp_rt->rt6i_gateway)) {
-		netdev_info(saddr_dst->dst->dev, "%pI6 -> %pI6 gateway match",
+		netdev_info(saddr_dst->dst->dev, "%pI6c -> %pI6c gateway match",
 			    &score->ifa->addr, &saddr_dst->fl6->daddr);
 		ret = 1;
-	} else {
-		netdev_info(saddr_dst->dst->dev, "%pI6 -> %pI6 gateway no match (%pI6, %pI6)",
-			    &score->ifa->addr, &saddr_dst->fl6->daddr,
-			    &rt->rt6i_gateway, &cmp_rt->rt6i_gateway);
+		goto out_release_dst;
+	}
+
+	struct fib6_info *f6i;
+
+	netdev_info(saddr_dst->dst->dev, "%pI6c -> %pI6c initial gateway no match (want=%pI6c, have=%pI6c)",
+		    &score->ifa->addr, &saddr_dst->fl6->daddr,
+		    &rt->rt6i_gateway, &cmp_rt->rt6i_gateway);
+
+	for (f6i = rcu_dereference(cmp_rt->from); f6i;
+	     f6i = rcu_dereference(f6i->fib6_next)) {
+		struct fib6_nh *f6n;
+
+		f6n = f6i->fib6_nh;
+
+		if (f6n->nh_common.nhc_gw_family != AF_INET6) {
+			netdev_info(saddr_dst->dst->dev, "check f6i=%px first gw_family!=AF_INET6", f6i);
+			continue;
+		}
+		netdev_info(saddr_dst->dst->dev, "check f6i=%px first nh=%pI6c", f6i, &f6n->nh_common.nhc_gw.ipv6);
+
+		if (ipv6_addr_equal(&rt->rt6i_gateway, &f6n->nh_common.nhc_gw.ipv6)) {
+			netdev_info(saddr_dst->dst->dev, "^ hit");
+			ret = 1;
+			goto out_release_dst;
+		}
+
+		if (!f6i->fib6_nsiblings)
+			continue;
+
+		struct fib6_info *sibling;
+
+		list_for_each_entry(sibling, &f6i->fib6_siblings, fib6_siblings) {
+			f6n = sibling->fib6_nh;
+
+			if (f6n->nh_common.nhc_gw_family != AF_INET6) {
+				netdev_info(saddr_dst->dst->dev, "  + sibling=%px gw_family!=AF_INET6", sibling);
+				continue;
+			}
+			netdev_info(saddr_dst->dst->dev, "  + sibling=%px nh=%pI6c", sibling, &f6n->nh_common.nhc_gw.ipv6);
+
+			if (ipv6_addr_equal(&rt->rt6i_gateway, &f6n->nh_common.nhc_gw.ipv6)) {
+				netdev_info(saddr_dst->dst->dev, "^ hit");
+				ret = 1;
+				goto out_release_dst;
+			}
+		}
 	}
 
 out_release_dst:
@@ -1637,6 +1680,7 @@ static int ipv6_get_saddr_eval(struct net *net,
 	 */
 	static const int subtrees_enabled = 1;
 #else
+#error wtf
 	static const int subtrees_enabled = 0;
 #endif
 	int ret;
