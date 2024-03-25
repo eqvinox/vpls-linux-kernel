@@ -1580,12 +1580,23 @@ static bool ipv6_allow_optimistic_dad(const struct net *net,
 #endif
 }
 
+/* "source address is preferable if the chosen nexthop advertised it as a PIO"
+ * => consider 'advertised as a PIO' to be 'the routes for the source's subtree
+ *    include one with the same nexthop'
+ *
+ * NB: there is no backtracking in the subtree here, this is intentional -
+ * each prefix seen (and accepted) in PIOs creates essentially a "zone" which
+ * is our search scope.
+ */
 static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
 			      struct ipv6_saddr_dst *saddr_dst)
 {
 	const struct rt6_info *rt, *cmp_rt;
 	struct dst_entry *cmp_dst;
+	struct fib6_info *f6i;
 	int ret = 0;
+
+	rt = container_of(saddr_dst->dst, struct rt6_info, dst);
 
 	/* fl6->saddr is ::, cf. check at the top of ipv6_common_get_saddr() */
 	saddr_dst->fl6->saddr = score->ifa->addr;
@@ -1600,39 +1611,22 @@ static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
 		goto out_release_dst;
 	}
 
-	if (saddr_dst->dst->dev != cmp_dst->dev)
-		goto out_release_dst;
-
-	rt = container_of(saddr_dst->dst, struct rt6_info, dst);
 	cmp_rt = container_of(cmp_dst, struct rt6_info, dst);
 
-	if (ipv6_addr_equal(&rt->rt6i_gateway, &cmp_rt->rt6i_gateway)) {
-		netdev_info(saddr_dst->dst->dev, "%pI6c -> %pI6c gateway match",
-			    &score->ifa->addr, &saddr_dst->fl6->daddr);
-		ret = 1;
-		goto out_release_dst;
-	}
-
-	struct fib6_info *f6i;
-
-	netdev_info(saddr_dst->dst->dev, "%pI6c -> %pI6c initial gateway no match (want=%pI6c, have=%pI6c)",
-		    &score->ifa->addr, &saddr_dst->fl6->daddr,
-		    &rt->rt6i_gateway, &cmp_rt->rt6i_gateway);
-
+	/* this must work if _any_ nexthop matches; the non-subtree best may
+	 * not be in same order as subtree best
+	 */
 	for (f6i = rcu_dereference(cmp_rt->from); f6i;
 	     f6i = rcu_dereference(f6i->fib6_next)) {
-		struct fib6_nh *f6n;
+		struct fib6_nh *f6n = f6i->fib6_nh;
+		struct fib6_info *sibling;
 
-		f6n = f6i->fib6_nh;
-
-		if (f6n->nh_common.nhc_gw_family != AF_INET6) {
-			netdev_info(saddr_dst->dst->dev, "check f6i=%px first gw_family!=AF_INET6", f6i);
+		if (f6n->nh_common.nhc_dev != saddr_dst->dst->dev ||
+		    f6n->nh_common.nhc_gw_family != AF_INET6)
 			continue;
-		}
-		netdev_info(saddr_dst->dst->dev, "check f6i=%px first nh=%pI6c", f6i, &f6n->nh_common.nhc_gw.ipv6);
 
-		if (ipv6_addr_equal(&rt->rt6i_gateway, &f6n->nh_common.nhc_gw.ipv6)) {
-			netdev_info(saddr_dst->dst->dev, "^ hit");
+		if (ipv6_addr_equal(&f6n->nh_common.nhc_gw.ipv6,
+				    &rt->rt6i_gateway)) {
 			ret = 1;
 			goto out_release_dst;
 		}
@@ -1640,19 +1634,15 @@ static int ipv6_saddr_rule5p5(struct ipv6_saddr_score *score,
 		if (!f6i->fib6_nsiblings)
 			continue;
 
-		struct fib6_info *sibling;
-
 		list_for_each_entry(sibling, &f6i->fib6_siblings, fib6_siblings) {
 			f6n = sibling->fib6_nh;
 
-			if (f6n->nh_common.nhc_gw_family != AF_INET6) {
-				netdev_info(saddr_dst->dst->dev, "  + sibling=%px gw_family!=AF_INET6", sibling);
+			if (f6n->nh_common.nhc_dev != saddr_dst->dst->dev ||
+			    f6n->nh_common.nhc_gw_family != AF_INET6)
 				continue;
-			}
-			netdev_info(saddr_dst->dst->dev, "  + sibling=%px nh=%pI6c", sibling, &f6n->nh_common.nhc_gw.ipv6);
 
-			if (ipv6_addr_equal(&rt->rt6i_gateway, &f6n->nh_common.nhc_gw.ipv6)) {
-				netdev_info(saddr_dst->dst->dev, "^ hit");
+			if (ipv6_addr_equal(&f6n->nh_common.nhc_gw.ipv6,
+					    &rt->rt6i_gateway)) {
 				ret = 1;
 				goto out_release_dst;
 			}
