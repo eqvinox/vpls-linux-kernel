@@ -1231,21 +1231,118 @@ errout:
 	rtnl_set_sk_err(net, RTNLGRP_ND_USEROPT, err);
 }
 
+struct nd_ra_conf {
+	/* neigh is filled in whereever it is needed first */
+	struct neighbour *neigh;
+
+	/* always valid */
+	int lifetime;
+	unsigned int pref;
+
+	/* -1 = unspecified for the next two */
+	int hoplimit;
+	__s64 mtu;
+};
+
+static int ndisc_ra_route(struct net *net, struct inet6_dev *in6_dev,
+			  struct sk_buff *skb, struct nd_ra_conf *conf)
+{
+	struct fib6_table *table;
+	u32 defrtr_usr_metric;
+	struct fib6_info *rt;
+
+	/* routes added from RAs do not use nexthop objects */
+	rt = rt6_get_dflt_router(net, &ipv6_hdr(skb)->saddr, skb->dev);
+	if (rt && !conf->neigh) {
+		conf->neigh = ip6_neigh_lookup(&rt->fib6_nh->fib_nh_gw6,
+					       rt->fib6_nh->fib_nh_dev, NULL,
+					       &ipv6_hdr(skb)->saddr);
+		if (!conf->neigh) {
+			ND_PRINTK(0, err,
+				  "RA: %s got default router without neighbour\n",
+				  __func__);
+			fib6_info_release(rt);
+			return -1;
+		}
+	}
+	/* Set default route metric as specified by user */
+	defrtr_usr_metric = in6_dev->cnf.ra_defrtr_metric;
+	/* delete the route if lifetime is 0 or if metric needs change */
+	if (rt && (conf->lifetime == 0 || rt->fib6_metric != defrtr_usr_metric)) {
+		ip6_del_rt(net, rt, false);
+		rt = NULL;
+	}
+
+	ND_PRINTK(3, info, "RA: rt: %p  lifetime: %d, metric: %d, for dev: %s\n",
+		  rt, conf->lifetime, defrtr_usr_metric, skb->dev->name);
+	if (!rt && conf->lifetime) {
+		ND_PRINTK(3, info, "RA: adding default router\n");
+
+		if (conf->neigh)
+			neigh_release(conf->neigh);
+
+		rt = rt6_add_dflt_router(net, &ipv6_hdr(skb)->saddr,
+					 skb->dev, conf->pref, defrtr_usr_metric,
+					 conf->lifetime);
+		if (!rt) {
+			ND_PRINTK(0, err,
+				  "RA: %s failed to add default route\n",
+				  __func__);
+			return -1;
+		}
+
+		conf->neigh = ip6_neigh_lookup(&rt->fib6_nh->fib_nh_gw6,
+					       rt->fib6_nh->fib_nh_dev, NULL,
+					       &ipv6_hdr(skb)->saddr);
+		if (!conf->neigh) {
+			ND_PRINTK(0, err,
+				  "RA: %s got default router without neighbour\n",
+				  __func__);
+			fib6_info_release(rt);
+			return -1;
+		}
+		conf->neigh->flags |= NTF_ROUTER;
+	} else if (rt && IPV6_EXTRACT_PREF(rt->fib6_flags) != conf->pref) {
+		struct nl_info nlinfo = {
+			.nl_net = net,
+		};
+		rt->fib6_flags = (rt->fib6_flags & ~RTF_PREF_MASK) | RTF_PREF(conf->pref);
+		inet6_rt_notify(RTM_NEWROUTE, rt, &nlinfo, NLM_F_REPLACE);
+	}
+
+	if (!rt)
+		return 0;
+
+	if (conf->hoplimit != -1)
+		fib6_metric_set(rt, RTAX_HOPLIMIT, conf->hoplimit);
+	if (conf->mtu != -1)
+		fib6_metric_set(rt, RTAX_MTU, conf->mtu);
+
+	table = rt->fib6_table;
+	spin_lock_bh(&table->tb6_lock);
+
+	fib6_set_expires(rt, jiffies + (HZ * conf->lifetime));
+	fib6_add_gc_list(rt);
+
+	spin_unlock_bh(&table->tb6_lock);
+
+	fib6_info_release(rt);
+	return 0;
+}
+
 static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 {
 	struct ra_msg *ra_msg = (struct ra_msg *)skb_transport_header(skb);
 	bool send_ifinfo_notify = false;
-	struct neighbour *neigh = NULL;
 	struct ndisc_options ndopts;
-	struct fib6_info *rt = NULL;
 	struct inet6_dev *in6_dev;
-	struct fib6_table *table;
-	u32 defrtr_usr_metric;
-	unsigned int pref = 0;
+	struct nd_ra_conf conf = {
+		.hoplimit = -1,
+		.mtu = -1,
+	};
 	__u32 old_if_flags;
 	struct net *net;
 	SKB_DR(reason);
-	int lifetime;
 	int optlen;
 
 	__u8 *opt = (__u8 *)(ra_msg + 1);
@@ -1327,12 +1424,12 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 		goto skip_defrtr;
 	}
 
-	lifetime = ntohs(ra_msg->icmph.icmp6_rt_lifetime);
-	if (lifetime != 0 &&
-	    lifetime < READ_ONCE(in6_dev->cnf.accept_ra_min_lft)) {
+	conf.lifetime = ntohs(ra_msg->icmph.icmp6_rt_lifetime);
+	if (conf.lifetime != 0 &&
+	    conf.lifetime < READ_ONCE(in6_dev->cnf.accept_ra_min_lft)) {
 		ND_PRINTK(2, info,
 			  "RA: router lifetime (%ds) is too short: %s\n",
-			  lifetime, skb->dev->name);
+			  conf.lifetime, skb->dev->name);
 		goto skip_defrtr;
 	}
 
@@ -1349,93 +1446,51 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 	}
 
 #ifdef CONFIG_IPV6_ROUTER_PREF
-	pref = ra_msg->icmph.icmp6_router_pref;
+	conf.pref = ra_msg->icmph.icmp6_router_pref;
 	/* 10b is handled as if it were 00b (medium) */
-	if (pref == ICMPV6_ROUTER_PREF_INVALID ||
+	if (conf.pref == ICMPV6_ROUTER_PREF_INVALID ||
 	    !READ_ONCE(in6_dev->cnf.accept_ra_rtr_pref))
-		pref = ICMPV6_ROUTER_PREF_MEDIUM;
+		conf.pref = ICMPV6_ROUTER_PREF_MEDIUM;
 #endif
-	/* routes added from RAs do not use nexthop objects */
-	rt = rt6_get_dflt_router(net, &ipv6_hdr(skb)->saddr, skb->dev);
-	if (rt) {
-		neigh = ip6_neigh_lookup(&rt->fib6_nh->fib_nh_gw6,
-					 rt->fib6_nh->fib_nh_dev, NULL,
-					  &ipv6_hdr(skb)->saddr);
-		if (!neigh) {
-			ND_PRINTK(0, err,
-				  "RA: %s got default router without neighbour\n",
-				  __func__);
-			fib6_info_release(rt);
-			return reason;
-		}
-	}
-	/* Set default route metric as specified by user */
-	defrtr_usr_metric = in6_dev->cnf.ra_defrtr_metric;
-	/* delete the route if lifetime is 0 or if metric needs change */
-	if (rt && (lifetime == 0 || rt->fib6_metric != defrtr_usr_metric)) {
-		ip6_del_rt(net, rt, false);
-		rt = NULL;
-	}
-
-	ND_PRINTK(3, info, "RA: rt: %p  lifetime: %d, metric: %d, for dev: %s\n",
-		  rt, lifetime, defrtr_usr_metric, skb->dev->name);
-	if (!rt && lifetime) {
-		ND_PRINTK(3, info, "RA: adding default router\n");
-
-		if (neigh)
-			neigh_release(neigh);
-
-		rt = rt6_add_dflt_router(net, &ipv6_hdr(skb)->saddr,
-					 skb->dev, pref, defrtr_usr_metric,
-					 lifetime);
-		if (!rt) {
-			ND_PRINTK(0, err,
-				  "RA: %s failed to add default route\n",
-				  __func__);
-			return reason;
-		}
-
-		neigh = ip6_neigh_lookup(&rt->fib6_nh->fib_nh_gw6,
-					 rt->fib6_nh->fib_nh_dev, NULL,
-					  &ipv6_hdr(skb)->saddr);
-		if (!neigh) {
-			ND_PRINTK(0, err,
-				  "RA: %s got default router without neighbour\n",
-				  __func__);
-			fib6_info_release(rt);
-			return reason;
-		}
-		neigh->flags |= NTF_ROUTER;
-	} else if (rt && IPV6_EXTRACT_PREF(rt->fib6_flags) != pref) {
-		struct nl_info nlinfo = {
-			.nl_net = net,
-		};
-		rt->fib6_flags = (rt->fib6_flags & ~RTF_PREF_MASK) | RTF_PREF(pref);
-		inet6_rt_notify(RTM_NEWROUTE, rt, &nlinfo, NLM_F_REPLACE);
-	}
-
-	if (rt) {
-		table = rt->fib6_table;
-		spin_lock_bh(&table->tb6_lock);
-
-		fib6_set_expires(rt, jiffies + (HZ * lifetime));
-		fib6_add_gc_list(rt);
-
-		spin_unlock_bh(&table->tb6_lock);
-	}
 	if (READ_ONCE(in6_dev->cnf.accept_ra_min_hop_limit) < 256 &&
 	    ra_msg->icmph.icmp6_hop_limit) {
 		if (READ_ONCE(in6_dev->cnf.accept_ra_min_hop_limit) <=
 		    ra_msg->icmph.icmp6_hop_limit) {
 			WRITE_ONCE(in6_dev->cnf.hop_limit,
 				   ra_msg->icmph.icmp6_hop_limit);
-			fib6_metric_set(rt, RTAX_HOPLIMIT,
-					ra_msg->icmph.icmp6_hop_limit);
+			conf.hoplimit = ra_msg->icmph.icmp6_hop_limit;
 		} else {
 			ND_PRINTK(2, warn, "RA: Got route advertisement with lower hop_limit than minimum\n");
 		}
 	}
 
+	if (ndopts.nd_opts_mtu && READ_ONCE(in6_dev->cnf.accept_ra_mtu)) {
+		__be32 n;
+		u32 mtu;
+
+		memcpy(&n, ((u8 *)(ndopts.nd_opts_mtu+1))+2, sizeof(mtu));
+		mtu = ntohl(n);
+
+		if (in6_dev->ra_mtu != mtu) {
+			in6_dev->ra_mtu = mtu;
+			send_ifinfo_notify = true;
+		}
+
+		if (mtu < IPV6_MIN_MTU || mtu > skb->dev->mtu) {
+			ND_PRINTK(2, warn, "RA: invalid mtu: %d\n", mtu);
+		} else if (READ_ONCE(in6_dev->cnf.mtu6) != mtu) {
+			WRITE_ONCE(in6_dev->cnf.mtu6, mtu);
+			conf.mtu = mtu;
+			rt6_mtu_change(skb->dev, mtu);
+		}
+	}
+
+	if (ndisc_ra_route(net, in6_dev, skb, &conf) != 0)
+		return reason;
+
+	/* TODO: double check for behavior changes on deletion, i.e. rt==NULL,
+	 * and "goto skip_defrtr" vs. "return reason" behavior
+	 */
 skip_defrtr:
 
 	/*
@@ -1479,10 +1534,10 @@ skip_linkparms:
 	 *	Process options.
 	 */
 
-	if (!neigh)
-		neigh = __neigh_lookup(&nd_tbl, &ipv6_hdr(skb)->saddr,
-				       skb->dev, 1);
-	if (neigh) {
+	if (!conf.neigh)
+		conf.neigh = __neigh_lookup(&nd_tbl, &ipv6_hdr(skb)->saddr,
+					    skb->dev, 1);
+	if (conf.neigh) {
 		u8 *lladdr = NULL;
 		if (ndopts.nd_opts_src_lladdr) {
 			lladdr = ndisc_opt_addr_data(ndopts.nd_opts_src_lladdr,
@@ -1493,7 +1548,7 @@ skip_linkparms:
 				goto out;
 			}
 		}
-		ndisc_update(skb->dev, neigh, lladdr, NUD_STALE,
+		ndisc_update(skb->dev, conf.neigh, lladdr, NUD_STALE,
 			     NEIGH_UPDATE_F_WEAK_OVERRIDE|
 			     NEIGH_UPDATE_F_OVERRIDE|
 			     NEIGH_UPDATE_F_OVERRIDE_ISROUTER|
@@ -1569,27 +1624,6 @@ skip_routeinfo:
 		}
 	}
 
-	if (ndopts.nd_opts_mtu && READ_ONCE(in6_dev->cnf.accept_ra_mtu)) {
-		__be32 n;
-		u32 mtu;
-
-		memcpy(&n, ((u8 *)(ndopts.nd_opts_mtu+1))+2, sizeof(mtu));
-		mtu = ntohl(n);
-
-		if (in6_dev->ra_mtu != mtu) {
-			in6_dev->ra_mtu = mtu;
-			send_ifinfo_notify = true;
-		}
-
-		if (mtu < IPV6_MIN_MTU || mtu > skb->dev->mtu) {
-			ND_PRINTK(2, warn, "RA: invalid mtu: %d\n", mtu);
-		} else if (READ_ONCE(in6_dev->cnf.mtu6) != mtu) {
-			WRITE_ONCE(in6_dev->cnf.mtu6, mtu);
-			fib6_metric_set(rt, RTAX_MTU, mtu);
-			rt6_mtu_change(skb->dev, mtu);
-		}
-	}
-
 	if (ndopts.nd_useropts) {
 		struct nd_opt_hdr *p;
 		for (p = ndopts.nd_useropts;
@@ -1610,9 +1644,8 @@ out:
 	if (send_ifinfo_notify)
 		inet6_ifinfo_notify(RTM_NEWLINK, in6_dev);
 
-	fib6_info_release(rt);
-	if (neigh)
-		neigh_release(neigh);
+	if (conf.neigh)
+		neigh_release(conf.neigh);
 	return reason;
 }
 
