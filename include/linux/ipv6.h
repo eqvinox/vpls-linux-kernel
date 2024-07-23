@@ -55,6 +55,7 @@ struct ipv6_devconf {
 #endif
 	__s32		accept_source_route;
 	__s32		accept_ra_from_local;
+	__s32		ra_pinfo_dst_src;
 #ifdef CONFIG_IPV6_OPTIMISTIC_DAD
 	__s32		optimistic_dad;
 	__s32		use_optimistic;

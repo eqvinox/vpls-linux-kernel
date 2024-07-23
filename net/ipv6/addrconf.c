@@ -202,6 +202,7 @@ static struct ipv6_devconf ipv6_devconf __read_mostly = {
 	.max_addresses		= IPV6_MAX_ADDRESSES,
 	.accept_ra_defrtr	= 1,
 	.ra_defrtr_metric	= IP6_RT_PRIO_USER,
+	.ra_pinfo_dst_src	= 0,
 	.accept_ra_from_local	= 0,
 	.accept_ra_min_hop_limit= 1,
 	.accept_ra_min_lft	= 0,
@@ -265,6 +266,7 @@ static struct ipv6_devconf ipv6_devconf_dflt __read_mostly = {
 	.max_addresses		= IPV6_MAX_ADDRESSES,
 	.accept_ra_defrtr	= 1,
 	.ra_defrtr_metric	= IP6_RT_PRIO_USER,
+	.ra_pinfo_dst_src	= 0,
 	.accept_ra_from_local	= 0,
 	.accept_ra_min_hop_limit= 1,
 	.accept_ra_min_lft	= 0,
@@ -5780,6 +5782,8 @@ static void ipv6_store_devconf(const struct ipv6_devconf *cnf,
 	array[DEVCONF_MAX_ADDRESSES] = READ_ONCE(cnf->max_addresses);
 	array[DEVCONF_ACCEPT_RA_DEFRTR] = READ_ONCE(cnf->accept_ra_defrtr);
 	array[DEVCONF_RA_DEFRTR_METRIC] = READ_ONCE(cnf->ra_defrtr_metric);
+	array[DEVCONF_RA_PINFO_DST_SRC] =
+		READ_ONCE(cnf->ra_pinfo_dst_src);
 	array[DEVCONF_ACCEPT_RA_MIN_HOP_LIMIT] =
 		READ_ONCE(cnf->accept_ra_min_hop_limit);
 	array[DEVCONF_ACCEPT_RA_PINFO] = READ_ONCE(cnf->accept_ra_pinfo);
@@ -7168,6 +7172,13 @@ static const struct ctl_table addrconf_sysctl[] = {
 	{
 		.procname	= "accept_ra_mtu",
 		.data		= &ipv6_devconf.accept_ra_mtu,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "ra_pinfo_dst_src",
+		.data		= &ipv6_devconf.ra_pinfo_dst_src,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
