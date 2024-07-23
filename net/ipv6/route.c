@@ -974,7 +974,7 @@ int rt6_route_rcv(struct net_device *dev, u8 *opt, int len,
 	}
 
 	if (rinfo->prefix_len == 0)
-		rt = rt6_get_dflt_router(net, gwaddr, dev);
+		rt = rt6_get_dflt_router(net, gwaddr, dev, NULL, 0);
 	else
 		rt = rt6_get_route_info(net, prefix, rinfo->prefix_len,
 					gwaddr, dev);
@@ -4332,18 +4332,33 @@ static struct fib6_info *rt6_add_route_info(struct net *net,
 
 struct fib6_info *rt6_get_dflt_router(struct net *net,
 				     const struct in6_addr *addr,
-				     struct net_device *dev)
+				     struct net_device *dev,
+				     const struct in6_addr *src_pfx,
+				     int src_plen)
 {
 	u32 tb_id = l3mdev_fib_table(dev) ? : RT6_TABLE_DFLT;
-	struct fib6_info *rt;
+	struct fib6_info *rt = NULL;
 	struct fib6_table *table;
+	struct fib6_node *node;
 
 	table = fib6_get_table(net, tb_id);
 	if (!table)
 		return NULL;
 
 	rcu_read_lock();
-	for_each_fib6_node_rt_rcu(&table->tb6_root) {
+	node = &table->tb6_root;
+	if (src_plen) {
+		struct in6_addr zero = {};
+
+		/* fib6_locate returns the dst node if dst->subtree is NULL! */
+		if (!node->subtree)
+			goto out_unlock;
+
+		node = fib6_locate(node, &zero, 0, src_pfx, src_plen, true);
+		if (!node)
+			goto out_unlock;
+	}
+	for_each_fib6_node_rt_rcu(node) {
 		struct fib6_nh *nh;
 
 		/* RA routes do not use nexthops */
@@ -4358,6 +4373,7 @@ struct fib6_info *rt6_get_dflt_router(struct net *net,
 	}
 	if (rt && !fib6_info_hold_safe(rt))
 		rt = NULL;
+out_unlock:
 	rcu_read_unlock();
 	return rt;
 }
@@ -4367,7 +4383,9 @@ struct fib6_info *rt6_add_dflt_router(struct net *net,
 				     struct net_device *dev,
 				     unsigned int pref,
 				     u32 defrtr_usr_metric,
-				     int lifetime)
+				     int lifetime,
+				     const struct in6_addr *src_pfx,
+				     int src_plen)
 {
 	struct fib6_config cfg = {
 		.fc_table	= l3mdev_fib_table(dev) ? : RT6_TABLE_DFLT,
@@ -4384,16 +4402,20 @@ struct fib6_info *rt6_add_dflt_router(struct net *net,
 	};
 
 	cfg.fc_gateway = *gwaddr;
+	if (src_plen && src_pfx) {
+		cfg.fc_src_len = src_plen,
+		cfg.fc_src = *src_pfx;
+	}
 
 	if (!ip6_route_add(&cfg, GFP_ATOMIC, NULL)) {
 		struct fib6_table *table;
 
 		table = fib6_get_table(dev_net(dev), cfg.fc_table);
-		if (table)
+		if (table && !src_plen)
 			table->flags |= RT6_TABLE_HAS_DFLT_ROUTER;
 	}
 
-	return rt6_get_dflt_router(net, gwaddr, dev);
+	return rt6_get_dflt_router(net, gwaddr, dev, src_pfx, src_plen);
 }
 
 static void __rt6_purge_dflt_routers(struct net *net,

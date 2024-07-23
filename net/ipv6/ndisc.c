@@ -1245,14 +1245,16 @@ struct nd_ra_conf {
 };
 
 static int ndisc_ra_route(struct net *net, struct inet6_dev *in6_dev,
-			  struct sk_buff *skb, struct nd_ra_conf *conf)
+			  struct sk_buff *skb, struct nd_ra_conf *conf,
+			  const struct in6_addr *src_pfx, int src_plen)
 {
 	struct fib6_table *table;
 	u32 defrtr_usr_metric;
 	struct fib6_info *rt;
 
 	/* routes added from RAs do not use nexthop objects */
-	rt = rt6_get_dflt_router(net, &ipv6_hdr(skb)->saddr, skb->dev);
+	rt = rt6_get_dflt_router(net, &ipv6_hdr(skb)->saddr, skb->dev,
+				 src_pfx, src_plen);
 	if (rt && !conf->neigh) {
 		conf->neigh = ip6_neigh_lookup(&rt->fib6_nh->fib_nh_gw6,
 					       rt->fib6_nh->fib_nh_dev, NULL,
@@ -1265,10 +1267,13 @@ static int ndisc_ra_route(struct net *net, struct inet6_dev *in6_dev,
 			return -1;
 		}
 	}
+	/* FIXME: cap lifetime by PIO lifetime here */
+
 	/* Set default route metric as specified by user */
 	defrtr_usr_metric = in6_dev->cnf.ra_defrtr_metric;
 	/* delete the route if lifetime is 0 or if metric needs change */
 	if (rt && (conf->lifetime == 0 || rt->fib6_metric != defrtr_usr_metric)) {
+		/* FIXME: table walk for dst-src nodes... */
 		ip6_del_rt(net, rt, false);
 		rt = NULL;
 	}
@@ -1283,7 +1288,7 @@ static int ndisc_ra_route(struct net *net, struct inet6_dev *in6_dev,
 
 		rt = rt6_add_dflt_router(net, &ipv6_hdr(skb)->saddr,
 					 skb->dev, conf->pref, defrtr_usr_metric,
-					 conf->lifetime);
+					 conf->lifetime, src_pfx, src_plen);
 		if (!rt) {
 			ND_PRINTK(0, err,
 				  "RA: %s failed to add default route\n",
@@ -1340,6 +1345,7 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 		.hoplimit = -1,
 		.mtu = -1,
 	};
+	__s32 ra_pinfo_dst_src;
 	__u32 old_if_flags;
 	struct net *net;
 	SKB_DR(reason);
@@ -1452,8 +1458,10 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 	    !READ_ONCE(in6_dev->cnf.accept_ra_rtr_pref))
 		conf.pref = ICMPV6_ROUTER_PREF_MEDIUM;
 #endif
+
 	if (READ_ONCE(in6_dev->cnf.accept_ra_min_hop_limit) < 256 &&
 	    ra_msg->icmph.icmp6_hop_limit) {
+		/* FIXME: apply on all dst-src routes */
 		if (READ_ONCE(in6_dev->cnf.accept_ra_min_hop_limit) <=
 		    ra_msg->icmph.icmp6_hop_limit) {
 			WRITE_ONCE(in6_dev->cnf.hop_limit,
@@ -1485,8 +1493,38 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 		}
 	}
 
-	if (ndisc_ra_route(net, in6_dev, skb, &conf) != 0)
-		return reason;
+	ra_pinfo_dst_src = READ_ONCE(in6_dev->cnf.ra_pinfo_dst_src);
+	if (ra_pinfo_dst_src <= 1) {
+		if (ndisc_ra_route(net, in6_dev, skb, &conf, NULL, 0) != 0)
+			return reason;
+	}
+
+	if (ra_pinfo_dst_src >= 1) {
+		struct nd_opt_hdr *p;
+		struct in6_addr zero = {};
+
+		for (p = ndopts.nd_opts_pi;
+		     p;
+		     p = ndisc_next_option(p, ndopts.nd_opts_pi_end)) {
+			const struct prefix_info *pinfo;
+
+			pinfo = (struct prefix_info *)p;
+			if (ndisc_ra_route(net, in6_dev, skb, &conf,
+					   &pinfo->prefix, pinfo->prefix_len) != 0)
+				return reason;
+		}
+
+		/* ::/128 route for route lookups done before source address
+		 * selection has happened.
+		 *
+		 * Preferences on these control which gateway is chosen, which
+		 * controls which source address will be chosen, which in turn
+		 * pins traffic to using one of the source specific routes
+		 * installed above.
+		 */
+		if (ndisc_ra_route(net, in6_dev, skb, &conf, &zero, 128) != 0)
+			return reason;
+	}
 
 	/* TODO: double check for behavior changes on deletion, i.e. rt==NULL,
 	 * and "goto skip_defrtr" vs. "return reason" behavior
